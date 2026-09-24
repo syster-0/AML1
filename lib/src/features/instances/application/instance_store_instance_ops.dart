@@ -248,13 +248,25 @@ mixin _InstanceStoreInstanceOps on _InstanceStoreCore {
     final world = quickPlaySingleplayer?.trim();
     final server = quickPlayMultiplayer?.trim();
     try {
-      await rust.launchInstance(
+      final process = await rust.launchInstance(
         id: id,
         javaPath: java,
         quickPlaySingleplayer: (world == null || world.isEmpty) ? null : world,
         quickPlayMultiplayer:
             (server == null || server.isEmpty) ? null : server,
       );
+      if (Platform.isAndroid) {
+        // The game is a separate Activity in the :game process, not an
+        // external process; hand it the private manifest path.
+        final manifestPath = process.manifestPath;
+        if (manifestPath == null || manifestPath.isEmpty) {
+          throw Exception('启动失败：缺少游戏清单路径');
+        }
+        await const MethodChannel('aml/launch').invokeMethod<void>(
+          'startGame',
+          <String, String>{'manifest': manifestPath},
+        );
+      }
       // Optimistic; `launched` event also updates runningIds.
       runningIds.value = {...runningIds.value, id};
     } catch (e, st) {

@@ -76,6 +76,7 @@ fn collect_autoinstalled_jre_paths(app_data_dir: &str) -> HashSet<PathBuf> {
 }
 
 fn common_installation_paths() -> HashSet<PathBuf> {
+    #[allow(unused_mut)]
     let mut paths = HashSet::new();
 
     #[cfg(target_os = "windows")]

@@ -3,6 +3,7 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
+import 'api/android.dart';
 import 'api/java_download.dart';
 import 'api/jre_scan.dart';
 import 'api/launcher.dart';
@@ -93,6 +94,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ModelFaceDto dco_decode_box_autoadd_model_face_dto(dynamic raw);
+
+  @protected
+  StagedJreDto dco_decode_box_autoadd_staged_jre_dto(dynamic raw);
 
   @protected
   TextI18nDto dco_decode_box_autoadd_text_i_18_n_dto(dynamic raw);
@@ -294,6 +298,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ModelFaceDto? dco_decode_opt_box_autoadd_model_face_dto(dynamic raw);
 
   @protected
+  StagedJreDto? dco_decode_opt_box_autoadd_staged_jre_dto(dynamic raw);
+
+  @protected
   TextI18nDto? dco_decode_opt_box_autoadd_text_i_18_n_dto(dynamic raw);
 
   @protected
@@ -349,6 +356,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SkinDto dco_decode_skin_dto(dynamic raw);
+
+  @protected
+  StagedJreDto dco_decode_staged_jre_dto(dynamic raw);
 
   @protected
   TextI18nDto dco_decode_text_i_18_n_dto(dynamic raw);
@@ -440,6 +450,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ModelFaceDto sse_decode_box_autoadd_model_face_dto(
+      SseDeserializer deserializer);
+
+  @protected
+  StagedJreDto sse_decode_box_autoadd_staged_jre_dto(
       SseDeserializer deserializer);
 
   @protected
@@ -670,6 +684,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       SseDeserializer deserializer);
 
   @protected
+  StagedJreDto? sse_decode_opt_box_autoadd_staged_jre_dto(
+      SseDeserializer deserializer);
+
+  @protected
   TextI18nDto? sse_decode_opt_box_autoadd_text_i_18_n_dto(
       SseDeserializer deserializer);
 
@@ -737,6 +755,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SkinDto sse_decode_skin_dto(SseDeserializer deserializer);
+
+  @protected
+  StagedJreDto sse_decode_staged_jre_dto(SseDeserializer deserializer);
 
   @protected
   TextI18nDto sse_decode_text_i_18_n_dto(SseDeserializer deserializer);
@@ -859,6 +880,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_model_face_dto(
       ModelFaceDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_staged_jre_dto(
+      StagedJreDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_text_i_18_n_dto(
@@ -1100,6 +1125,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       ModelFaceDto? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_staged_jre_dto(
+      StagedJreDto? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_text_i_18_n_dto(
       TextI18nDto? self, SseSerializer serializer);
 
@@ -1171,6 +1200,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_skin_dto(SkinDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_staged_jre_dto(StagedJreDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_text_i_18_n_dto(TextI18nDto self, SseSerializer serializer);

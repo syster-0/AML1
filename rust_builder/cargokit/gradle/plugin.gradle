@@ -95,7 +95,11 @@ class CargoKitPlugin implements Plugin<Project> {
    private Plugin _findFlutterPlugin(Map projects) {
         for (project in projects) {
             for (plugin in project.value.getPlugins()) {
-                if (plugin.class.name == "FlutterPlugin") {
+                // Flutter moved the class from default package to
+                // `com.flutter.gradle.FlutterPlugin`; `plugin.class.name` is the
+                // fully-qualified name, so match the simple name suffix.
+                def fqn = plugin.class.name
+                if (fqn == "FlutterPlugin" || fqn.endsWith(".FlutterPlugin")) {
                     return plugin;
                 }
             }
@@ -121,24 +125,28 @@ class CargoKitPlugin implements Plugin<Project> {
         def cargoBuildDir = "${project.buildDir}/build"
         
         // Determine if the project is an application or library
-        def isApplication = plugin.project.plugins.hasPlugin('com.android.application')
-        def variants = isApplication ? plugin.project.android.applicationVariants : plugin.project.android.libraryVariants
+            def isApplication = plugin.project.plugins.hasPlugin('com.android.application')
+            def variants = isApplication ? plugin.project.android.applicationVariants : plugin.project.android.libraryVariants
 
-        variants.all { variant ->
+            variants.all { variant ->
 
-            final buildType = variant.buildType.name
+                final buildType = variant.buildType.name
 
-            def cargoOutputDir = "${project.buildDir}/jniLibs/${buildType}";
-            def jniLibs = project.android.sourceSets.maybeCreate(buildType).jniLibs;
-            jniLibs.srcDir(new File(cargoOutputDir))
+                def cargoOutputDir = "${project.buildDir}/jniLibs/${buildType}";
+                def jniLibs = project.android.sourceSets.maybeCreate(buildType).jniLibs;
+                jniLibs.srcDir(new File(cargoOutputDir))
 
-            def platforms = plugin.getTargetPlatforms().collect()
-
-            // Same thing addFlutterDependencies does in flutter.gradle
-            if (buildType == "debug") {
-                platforms.add("android-x86")
-                platforms.add("android-x64")
-            }
+                // Flutter 3.44 removed `FlutterPlugin.getTargetPlatforms()` and
+                // dropped the x86 target (only android-arm/arm64/x64 ship). Mirror
+                // FlutterPluginUtils.getTargetPlatforms: read the `target-platform`
+                // gradle property (`-Ptarget-platform=...`, injected by `flutter
+                // build`), defaulting to the platforms Flutter still supports.
+                def defaultPlatforms = ["android-arm", "android-arm64", "android-x64"]
+                def targetPlatformProp = project.rootProject.findProperty("target-platform")
+                    ?: plugin.project.findProperty("target-platform")
+                def platforms = targetPlatformProp != null
+                    ? (targetPlatformProp as String).split(",").collect { it.trim() }
+                    : defaultPlatforms
 
             // The task name depends on plugin properties, which are not available
             // at this point

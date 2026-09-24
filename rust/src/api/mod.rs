@@ -1,3 +1,4 @@
+pub mod android;
 pub mod java_download;
 pub mod jre_scan;
 pub mod launcher;

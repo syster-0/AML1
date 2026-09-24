@@ -1,4 +1,6 @@
 use flutter_rust_bridge::DartFnFuture;
+#[cfg(target_os = "android")]
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::launcher;
@@ -367,18 +369,51 @@ pub async fn launch_instance(
     launcher::auth::refresh_active_account_if_needed()
         .await
         .map_err(|e| e.to_string())?;
-    launcher::install::launch_instance(
-        &id,
-        java_path,
-        quick_play_singleplayer,
-        quick_play_multiplayer,
-    )
+
+    #[cfg(target_os = "android")]
+    {
+        // The game runs in the `:game` process with an in-process JVM, so the
+        // launcher writes a private manifest instead of spawning `java`.
+        let resource = state::resource_dir().await.map_err(|e| e.to_string())?;
+        let files_root: PathBuf = Path::new(&resource)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(&resource));
+        let prepared = launcher::install::prepare_launch(
+            &id,
+            java_path,
+            quick_play_singleplayer,
+            quick_play_multiplayer,
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+        let instance_id = prepared.instance_id.clone();
+        let handle = crate::android::launch::launch_game(prepared, &files_root)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+        Ok(ProcessDto {
+            uuid: handle.meta.uuid,
+            instance_id,
+            manifest_path: Some(handle.manifest_path.to_string_lossy().into_owned()),
+        })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        launcher::install::launch_instance(
+            &id,
+            java_path,
+            quick_play_singleplayer,
+            quick_play_multiplayer,
+        )
         .await
         .map(|m| ProcessDto {
             uuid: m.uuid,
             instance_id: m.instance_id,
+            manifest_path: None,
         })
         .map_err(|e| e.to_string())
+    }
 }
 
 /// Java major version required by this instance's Minecraft metadata
@@ -390,21 +425,47 @@ pub async fn get_required_java_version(id: String) -> Result<u32, String> {
 }
 
 pub async fn kill_instance(id: String) -> Result<(), String> {
-    launcher::process::PROCESS_MANAGER
-        .kill_instance(&id)
-        .await
-        .map_err(|e| e.to_string())
+    #[cfg(target_os = "android")]
+    {
+        if crate::android::launch::kill_remote(&id) {
+            Ok(())
+        } else {
+            Err("no running game for this instance".into())
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        launcher::process::PROCESS_MANAGER
+            .kill_instance(&id)
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
 
 pub async fn list_running_processes() -> Result<Vec<ProcessDto>, String> {
-    Ok(launcher::process::PROCESS_MANAGER
-        .list()
-        .into_iter()
-        .map(|m| ProcessDto {
-            uuid: m.uuid,
-            instance_id: m.instance_id,
-        })
-        .collect())
+    #[cfg(target_os = "android")]
+    {
+        Ok(crate::android::launch::list_remote()
+            .into_iter()
+            .map(|m| ProcessDto {
+                uuid: m.uuid,
+                instance_id: m.instance_id,
+                manifest_path: None,
+            })
+            .collect())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(launcher::process::PROCESS_MANAGER
+            .list()
+            .into_iter()
+            .map(|m| ProcessDto {
+                uuid: m.uuid,
+                instance_id: m.instance_id,
+                manifest_path: None,
+            })
+            .collect())
+    }
 }
 
 /// Subscribe to Minecraft process lifecycle events (`launched` / `finished`).
@@ -869,6 +930,9 @@ pub async fn stream_world_map_preview(
 pub struct ProcessDto {
     pub uuid: String,
     pub instance_id: String,
+    /// Android only: path of the private launch manifest; Dart passes it to
+    /// `GameActivity` through a platform channel. `None` on desktop.
+    pub manifest_path: Option<String>,
 }
 
 #[derive(Clone, Debug)]

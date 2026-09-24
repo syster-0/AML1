@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1085021000;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -33586089;
 
 // Section: executor
 
@@ -2949,6 +2949,40 @@ fn wire__crate__api__launcher__preview_pack_file_impl(
         },
     )
 }
+fn wire__crate__api__android__probe_staged_jre_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "probe_staged_jre",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_files_dir = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok =
+                        Result::<_, ()>::Ok(crate::api::android::probe_staged_jre(api_files_dir))?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__launcher__reinstall_modpack_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -5392,6 +5426,19 @@ impl SseDecode for Option<crate::api::launcher::ModelFaceDto> {
     }
 }
 
+impl SseDecode for Option<crate::api::android::StagedJreDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::android::StagedJreDto>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::project_i18n::TextI18nDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -5554,9 +5601,11 @@ impl SseDecode for crate::api::launcher::ProcessDto {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_uuid = <String>::sse_decode(deserializer);
         let mut var_instanceId = <String>::sse_decode(deserializer);
+        let mut var_manifestPath = <Option<String>>::sse_decode(deserializer);
         return crate::api::launcher::ProcessDto {
             uuid: var_uuid,
             instance_id: var_instanceId,
+            manifest_path: var_manifestPath,
         };
     }
 }
@@ -5739,6 +5788,22 @@ impl SseDecode for crate::api::launcher::SkinDto {
             texture_data_url: var_textureDataUrl,
             source: var_source,
             is_equipped: var_isEquipped,
+        };
+    }
+}
+
+impl SseDecode for crate::api::android::StagedJreDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_javaHome = <String>::sse_decode(deserializer);
+        let mut var_version = <String>::sse_decode(deserializer);
+        let mut var_majorVersion = <u32>::sse_decode(deserializer);
+        let mut var_arch = <String>::sse_decode(deserializer);
+        return crate::api::android::StagedJreDto {
+            java_home: var_javaHome,
+            version: var_version,
+            major_version: var_majorVersion,
+            arch: var_arch,
         };
     }
 }
@@ -6235,114 +6300,115 @@ fn pde_ffi_dispatcher_primary_impl(
             data_len,
         ),
         72 => wire__crate__api__launcher__preview_pack_file_impl(port, ptr, rust_vec_len, data_len),
-        73 => wire__crate__api__launcher__reinstall_modpack_impl(port, ptr, rust_vec_len, data_len),
-        74 => wire__crate__api__launcher__remove_account_impl(port, ptr, rust_vec_len, data_len),
-        75 => {
+        73 => wire__crate__api__android__probe_staged_jre_impl(port, ptr, rust_vec_len, data_len),
+        74 => wire__crate__api__launcher__reinstall_modpack_impl(port, ptr, rust_vec_len, data_len),
+        75 => wire__crate__api__launcher__remove_account_impl(port, ptr, rust_vec_len, data_len),
+        76 => {
             wire__crate__api__launcher__remove_custom_skin_impl(port, ptr, rust_vec_len, data_len)
         }
-        76 => wire__crate__api__launcher__remove_instance_impl(port, ptr, rust_vec_len, data_len),
-        77 => {
+        77 => wire__crate__api__launcher__remove_instance_impl(port, ptr, rust_vec_len, data_len),
+        78 => {
             wire__crate__api__launcher__remove_instance_mod_impl(port, ptr, rust_vec_len, data_len)
         }
-        78 => wire__crate__api__launcher__remove_instance_server_impl(
+        79 => wire__crate__api__launcher__remove_instance_server_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        79 => wire__crate__api__launcher__remove_yggdrasil_service_impl(
+        80 => wire__crate__api__launcher__remove_yggdrasil_service_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        80 => wire__crate__api__launcher__resolve_asset_preview_impl(
+        81 => wire__crate__api__launcher__resolve_asset_preview_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        81 => {
+        82 => {
             wire__crate__api__launcher__restore_world_backup_impl(port, ptr, rust_vec_len, data_len)
         }
-        82 => wire__crate__api__launcher__retry_missing_content_impl(
+        83 => wire__crate__api__launcher__retry_missing_content_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        83 => wire__crate__api__launcher__save_custom_skin_impl(port, ptr, rust_vec_len, data_len),
-        84 => wire__crate__api__launcher__save_yggdrasil_service_impl(
+        84 => wire__crate__api__launcher__save_custom_skin_impl(port, ptr, rust_vec_len, data_len),
+        85 => wire__crate__api__launcher__save_yggdrasil_service_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        85 => {
+        86 => {
             wire__crate__api__launcher__scan_instance_assets_impl(port, ptr, rust_vec_len, data_len)
         }
-        86 => {
+        87 => {
             wire__crate__api__launcher__set_active_account_impl(port, ptr, rust_vec_len, data_len)
         }
-        87 => wire__crate__api__launcher__set_instance_auto_backup_worlds_impl(
+        88 => wire__crate__api__launcher__set_instance_auto_backup_worlds_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        88 => {
+        89 => {
             wire__crate__api__launcher__set_instance_groups_impl(port, ptr, rust_vec_len, data_len)
         }
-        89 => {
+        90 => {
             wire__crate__api__launcher__set_launch_defaults_impl(port, ptr, rust_vec_len, data_len)
         }
-        90 => wire__crate__api__launcher__set_mod_enabled_impl(port, ptr, rust_vec_len, data_len),
-        91 => wire__crate__api__launcher__stream_world_map_preview_impl(
+        91 => wire__crate__api__launcher__set_mod_enabled_impl(port, ptr, rust_vec_len, data_len),
+        92 => wire__crate__api__launcher__stream_world_map_preview_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        92 => wire__crate__api__launcher__sync_instance_content_metadata_impl(
+        93 => wire__crate__api__launcher__sync_instance_content_metadata_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        93 => wire__crate__api__java_download__test_jre_impl(port, ptr, rust_vec_len, data_len),
-        94 => {
+        94 => wire__crate__api__java_download__test_jre_impl(port, ptr, rust_vec_len, data_len),
+        95 => {
             wire__crate__api__project_i18n__text_i18n_hash_impl(port, ptr, rust_vec_len, data_len)
         }
-        95 => wire__crate__api__project_i18n__translation_cache_stats_impl(
+        96 => wire__crate__api__project_i18n__translation_cache_stats_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        96 => wire__crate__api__project_i18n__translation_cache_stats_dto_total_bytes_impl(
+        97 => wire__crate__api__project_i18n__translation_cache_stats_dto_total_bytes_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        97 => wire__crate__api__launcher__unlink_modpack_impl(port, ptr, rust_vec_len, data_len),
-        98 => wire__crate__api__launcher__update_instance_impl(port, ptr, rust_vec_len, data_len),
-        99 => wire__crate__api__project_i18n__upsert_project_i18n_impl(
+        98 => wire__crate__api__launcher__unlink_modpack_impl(port, ptr, rust_vec_len, data_len),
+        99 => wire__crate__api__launcher__update_instance_impl(port, ptr, rust_vec_len, data_len),
+        100 => wire__crate__api__project_i18n__upsert_project_i18n_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        100 => {
+        101 => {
             wire__crate__api__project_i18n__upsert_text_i18n_impl(port, ptr, rust_vec_len, data_len)
         }
-        101 => wire__crate__api__launcher__watch_live_log_events_impl(
+        102 => wire__crate__api__launcher__watch_live_log_events_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        102 => {
+        103 => {
             wire__crate__api__launcher__watch_process_events_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),
@@ -7021,6 +7087,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::launcher::ProcessDto {
         [
             self.uuid.into_into_dart().into_dart(),
             self.instance_id.into_into_dart().into_dart(),
+            self.manifest_path.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -7221,6 +7288,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::launcher::SkinDto>
     for crate::api::launcher::SkinDto
 {
     fn into_into_dart(self) -> crate::api::launcher::SkinDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::android::StagedJreDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.java_home.into_into_dart().into_dart(),
+            self.version.into_into_dart().into_dart(),
+            self.major_version.into_into_dart().into_dart(),
+            self.arch.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::android::StagedJreDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::android::StagedJreDto>
+    for crate::api::android::StagedJreDto
+{
+    fn into_into_dart(self) -> crate::api::android::StagedJreDto {
         self
     }
 }
@@ -8161,6 +8251,16 @@ impl SseEncode for Option<crate::api::launcher::ModelFaceDto> {
     }
 }
 
+impl SseEncode for Option<crate::api::android::StagedJreDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::android::StagedJreDto>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::project_i18n::TextI18nDto> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -8277,6 +8377,7 @@ impl SseEncode for crate::api::launcher::ProcessDto {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.uuid, serializer);
         <String>::sse_encode(self.instance_id, serializer);
+        <Option<String>>::sse_encode(self.manifest_path, serializer);
     }
 }
 
@@ -8385,6 +8486,16 @@ impl SseEncode for crate::api::launcher::SkinDto {
         <String>::sse_encode(self.texture_data_url, serializer);
         <String>::sse_encode(self.source, serializer);
         <bool>::sse_encode(self.is_equipped, serializer);
+    }
+}
+
+impl SseEncode for crate::api::android::StagedJreDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.java_home, serializer);
+        <String>::sse_encode(self.version, serializer);
+        <u32>::sse_encode(self.major_version, serializer);
+        <String>::sse_encode(self.arch, serializer);
     }
 }
 

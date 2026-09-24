@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::process::Stdio;
+#[cfg(not(target_os = "android"))]
 use std::time::Instant;
 use tokio::process::Command;
 
@@ -249,13 +250,30 @@ fn read_jar_main_class(jar: &std::path::Path) -> Result<String> {
     Err(anyhow!("Main-Class not found in {}", jar.display()))
 }
 
-pub async fn launch_instance(
+/// Everything resolved before the game is started. Platform launch adapters
+/// consume it: an external process on desktop, a launch manifest + in-process
+/// HotSpot VM on Android.
+pub(crate) struct PreparedLaunch {
+    pub instance_id: String,
+    pub instance_name: String,
+    pub args: super::args::LaunchArgs,
+    /// Kept alive for the game's lifetime on desktop so the launch RPC stays
+    /// connected. Does not exist on Android.
+    #[cfg(not(target_os = "android"))]
+    pub rpc_server: super::rpc::RpcServer,
+    pub log_path: std::path::PathBuf,
+    pub xml_logging: bool,
+    pub quick_play_world: Option<String>,
+}
+
+/// Resolve every launch input (version metadata, account, classpath, JVM and
+/// game arguments) without starting the game.
+pub(crate) async fn prepare_launch(
     instance_id: &str,
     java_path: String,
     quick_play_singleplayer: Option<String>,
     quick_play_multiplayer: Option<String>,
-) -> Result<super::process::ProcessMetadata> {
-    let launch_started = Instant::now();
+) -> Result<PreparedLaunch> {
     let state = try_state()?;
     let resource = resource_dir().await?;
     let instance = db::get_instance(&state.pool, instance_id).await?;
@@ -290,27 +308,54 @@ pub async fn launch_instance(
         .clone()
         .filter(|p| !p.trim().is_empty())
         .unwrap_or(java_path);
-    let java_exe = dirs::java_executable(&configured)?;
 
-    let java_check_started = Instant::now();
-    let detected = crate::api::java_download::check_jre(java_exe.to_string_lossy().to_string())
-        .await
-        .ok_or_else(|| {
-            anyhow!(
-                "无法读取 Java 版本: {}（请确认路径指向 java.exe）",
-                java_exe.display()
-            )
-        })?;
-    let java_check_ms = java_check_started.elapsed().as_millis();
-    if (detected.major_version as u32) < required_major {
-        anyhow::bail!(
+    #[cfg(not(target_os = "android"))]
+    let java_major_detected = {
+        let java_exe = dirs::java_executable(&configured)?;
+
+        let java_check_started = Instant::now();
+        let detected = crate::api::java_download::check_jre(java_exe.to_string_lossy().to_string())
+            .await
+            .ok_or_else(|| {
+                anyhow!(
+                    "无法读取 Java 版本: {}（请确认路径指向 java.exe）",
+                    java_exe.display()
+                )
+            })?;
+        let java_check_ms = java_check_started.elapsed().as_millis();
+        if (detected.major_version as u32) < required_major {
+            anyhow::bail!(
 			"此 Minecraft 版本需要 Java {}（元数据 javaVersion.majorVersion），当前为 Java {}（{}）。请在设置中安装/配置 Java {}。",
 			required_major,
 			detected.major_version,
 			java_exe.display(),
 			required_major
 		);
-    }
+        }
+        let _ = java_check_ms;
+        detected.major_version as u32
+    };
+
+    #[cfg(target_os = "android")]
+    let java_major_detected = {
+        // The game runs inside an in-process HotSpot VM: there is no `java`
+        // binary to spawn. Validate the staged JRE layout directly instead.
+        let files_root = std::path::Path::new(&resource)
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from(&resource));
+        let jre = crate::android::runtime::jre::probe(files_root.to_string_lossy().as_ref())
+            .ok_or_else(|| anyhow!("未找到可用的内置 Java 运行时，请先在设置中安装。"))?;
+        if jre.major_version < required_major {
+            anyhow::bail!(
+                "此 Minecraft 版本需要 Java {}，当前内置运行时为 Java {}。",
+                required_major,
+                jre.major_version
+            );
+        }
+        jre.major_version
+    };
+    let _ = java_major_detected;
 
     let defaults = db::get_launch_defaults(&state.pool)
         .await
@@ -337,7 +382,6 @@ pub async fn launch_instance(
     let auth = super::args::LaunchAuth::from(&account);
     dirs::ensure_instance_dir(&resource, &instance.path).await?;
 
-    let manifest_started = Instant::now();
     let mc_manifest = match manifest::load_cached_minecraft_manifest(&resource).await {
         Ok(manifest) => manifest,
         Err(_) => manifest::fetch_minecraft_manifest(&resource).await?,
@@ -347,7 +391,6 @@ pub async fn launch_instance(
         version_index,
         &mc_manifest.versions,
     );
-    let manifest_ms = manifest_started.elapsed().as_millis();
 
     // Modern MC extracts natives into these subdirs at runtime.
     let natives_root = dirs::natives(&resource, &version_jar_id);
@@ -355,7 +398,10 @@ pub async fn launch_instance(
         tokio::fs::create_dir_all(natives_root.join(sub)).await?;
     }
 
+    #[cfg(not(target_os = "android"))]
     let rpc_server = super::rpc::RpcServerBuilder::new().launch().await?;
+    #[cfg(target_os = "android")]
+    let rpc_server: Option<super::rpc::RpcServer> = None;
     let authlib_injector = if account.kind == "yggdrasil" {
         let service_id = account
             .auth_server_id
@@ -369,7 +415,6 @@ pub async fn launch_instance(
         None
     };
 
-    let args_started = Instant::now();
     let xml_logging = info
         .logging
         .as_ref()
@@ -409,20 +454,35 @@ pub async fn launch_instance(
         server_endpoint,
         version: quick_play_version,
     };
+    // On Android the "java" path is only a label (the VM runs in-process).
+    let java_for_args: std::path::PathBuf = {
+        #[cfg(not(target_os = "android"))]
+        {
+            dirs::java_executable(&configured)?
+        }
+        #[cfg(target_os = "android")]
+        {
+            std::path::PathBuf::from(&configured)
+        }
+    };
+    #[cfg(not(target_os = "android"))]
+    let rpc_address = rpc_server.address();
+    #[cfg(target_os = "android")]
+    let rpc_address: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
     let mut args = super::args::build_launch_args(
         &resource,
         &instance.path,
         &version_jar_id,
         &info,
         &auth,
-        java_exe,
+        java_for_args,
         java_arch,
-        detected.major_version as u32,
+        java_major_detected,
         memory,
         resolution,
         &extra,
         &quick_play,
-        rpc_server.address(),
+        rpc_address,
     )?;
     if fullscreen
         && !args
@@ -459,8 +519,6 @@ pub async fn launch_instance(
             .unwrap_or(args.jvm_args.len());
         args.jvm_args.insert(first_agent, injector_arg);
     }
-    let args_ms = args_started.elapsed().as_millis();
-
     // Apply Minecraft language (and similar) via options.txt before spawn.
     if let Some(lang) = defaults
         .game_language
@@ -474,30 +532,66 @@ pub async fn launch_instance(
             .with_context(|| format!("写入游戏语言到 {}", options_path.display()))?;
     }
 
+    // Pre-launch hooks cannot run on Android (no external shell/semantics);
+    // desktop consumes them right before spawning.
+    #[cfg(not(target_os = "android"))]
+    {
+        let pre_launch = instance
+            .pre_launch_command
+            .as_deref()
+            .or(defaults.pre_launch_command.as_deref())
+            .filter(|value| !value.trim().is_empty());
+        if let Some(command) = pre_launch {
+            super::process::run_hook(command, &args.cwd, &args.env)
+                .await
+                .context("启动前命令失败")?;
+        }
+    }
+
     let log_path = dirs::instance_dir(&resource, &instance.path)
         .join("logs")
         .join("launcher_log.txt");
 
+    Ok(PreparedLaunch {
+        instance_id: instance_id.to_string(),
+        instance_name: instance.name,
+        args,
+        #[cfg(not(target_os = "android"))]
+        rpc_server,
+        log_path,
+        xml_logging,
+        quick_play_world: quick_play_singleplayer,
+    })
+}
+
+/// Launch the game as an external Java process (desktop platforms).
+#[cfg(not(target_os = "android"))]
+pub async fn launch_instance(
+    instance_id: &str,
+    java_path: String,
+    quick_play_singleplayer: Option<String>,
+    quick_play_multiplayer: Option<String>,
+) -> Result<super::process::ProcessMetadata> {
+    let launch_started = Instant::now();
+    let state = try_state()?;
+    let prepared = prepare_launch(
+        instance_id,
+        java_path,
+        quick_play_singleplayer,
+        quick_play_multiplayer.clone(),
+    )
+    .await?;
+
     let spawn_started = Instant::now();
-    let pre_launch = instance
-        .pre_launch_command
-        .as_deref()
-        .or(defaults.pre_launch_command.as_deref())
-        .filter(|value| !value.trim().is_empty());
-    if let Some(command) = pre_launch {
-        super::process::run_hook(command, &args.cwd, &args.env)
-            .await
-            .context("启动前命令失败")?;
-    }
     let meta = super::process::PROCESS_MANAGER
         .spawn(
-            instance_id,
-            args,
-            log_path,
-            rpc_server,
-            &instance.name,
-            xml_logging,
-            quick_play_singleplayer.clone(),
+            &prepared.instance_id,
+            prepared.args,
+            prepared.log_path,
+            prepared.rpc_server,
+            &prepared.instance_name,
+            prepared.xml_logging,
+            prepared.quick_play_world,
         )
         .await?;
     let spawn_ms = spawn_started.elapsed().as_millis();
@@ -510,13 +604,9 @@ pub async fn launch_instance(
         let _ = db::record_server_join(&state.pool, instance_id, addr).await;
     }
     eprintln!(
-		"[AML launch perf] instance={instance_id} total={}ms java={}ms manifest={}ms args={}ms spawn={}ms",
-		launch_started.elapsed().as_millis(),
-		java_check_ms,
-		manifest_ms,
-		args_ms,
-		spawn_ms,
-	);
+        "[AML launch perf] instance={instance_id} total={}ms spawn={spawn_ms}ms",
+        launch_started.elapsed().as_millis(),
+    );
     Ok(meta)
 }
 

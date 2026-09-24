@@ -28,6 +28,11 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // Restrict native ABIs: arm64 (real devices) + x86_64 (emulator).
+        // Avoids pulling unused Flutter engine ABIs (e.g. armeabi_v7a).
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     buildTypes {
@@ -35,6 +40,17 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // The JRE `.so` set must exist as real files on disk so the runtime
+            // loader can raw-`dlopen` them (libjsig/libjli/libjvm in order) and
+            // the HotSpot VM can open libjava/libzip/etc. AGP's default
+            // (useLegacyPackaging=false) only mmaps libs from inside the APK,
+            // leaving `nativeLibraryDir` empty — dlopen would find nothing.
+            useLegacyPackaging = true
         }
     }
 }

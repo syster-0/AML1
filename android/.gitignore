@@ -12,3 +12,9 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+
+# Bundled OpenJDK JRE runtime images (downloaded/verified at dev time;
+# not tracked — production ships these via runtime download, see
+# docs/android-adaptation-plan.md 2.1).
+app/src/main/jniLibs/x86_64/*.so
+app/src/main/jniLibs/arm64-v8a/*.so

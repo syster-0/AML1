@@ -1,14 +1,19 @@
+import 'dart:io';
+
 import 'package:aml/src/app/di/service_locator.dart';
 import 'package:aml/src/app/state/progress_state.dart';
+import 'package:aml/src/app/state/runtime_state.dart';
 import 'package:aml/src/features/discover/data/discover_ids.dart';
 import 'package:aml/src/features/instances/application/account_store.dart';
 import 'package:aml/src/features/java/application/java_download_service.dart';
 import 'package:aml/src/features/settings/application/java_settings_state.dart';
 import 'package:aml/src/features/settings/application/resource_settings_state.dart';
 import 'package:aml/src/features/settings/domain/models/java_settings.dart';
+import 'package:aml/src/rust/api/android.dart' as rust_android;
 import 'package:aml/src/rust/api/launcher.dart' as rust;
 import 'package:aml/src/shared/widgets/app_messenger.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:signals_flutter/signals_flutter.dart';
 
 part 'instance_store_instance_ops.dart';
@@ -253,9 +258,23 @@ class _InstanceStoreCore {
     return rust.listLoaderVersions(loader: loader, gameVersion: gameVersion);
   }
 
+  /// Probe the JRE staged at `<files>/jre` on Android; return its home path
+  /// when it satisfies [requiredMajor], otherwise null. The JRE is validated
+  /// in Rust without executing anything (no process spawn on this platform).
+  Future<String?> _resolveStagedAndroidJre(int requiredMajor) async {
+    final filesDir = getIt<RuntimeState>().appDataDirectory.value;
+    if (filesDir == null || filesDir.trim().isEmpty) return null;
+    final jre = await rust_android.probeStagedJre(filesDir: filesDir);
+    if (jre == null || jre.majorVersion < requiredMajor) return null;
+    return jre.javaHome;
+  }
+
   /// Resolve a configured Java path for [requiredMajor] without auto-install.
   /// Used by settings UI to show the effective default JRE.
   Future<String?> peekJavaForMajor(int requiredMajor) async {
+    if (Platform.isAndroid) {
+      return _resolveStagedAndroidJre(requiredMajor);
+    }
     final javaSettings = getIt<JavaSettingsState>();
     final download = getIt<JavaDownloadService>();
 
@@ -282,6 +301,13 @@ class _InstanceStoreCore {
   /// Resolve a Java executable suitable for [requiredMajor]
   /// (from version metadata `javaVersion.majorVersion`).
   Future<String> ensureJavaForMajor(int requiredMajor) async {
+    if (Platform.isAndroid) {
+      final jre = await _resolveStagedAndroidJre(requiredMajor);
+      if (jre != null) return jre;
+      throw Exception(
+        '此版本需要 Java $requiredMajor，请先在设置中安装对应运行时。',
+      );
+    }
     final javaSettings = getIt<JavaSettingsState>();
     final download = getIt<JavaDownloadService>();
     final slot = JavaSettings.settingsSlotForMajor(requiredMajor);

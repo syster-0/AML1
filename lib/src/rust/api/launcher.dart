@@ -1368,13 +1368,19 @@ class ProcessDto {
   final String uuid;
   final String instanceId;
 
+  /// Android only: path of the private launch manifest; Dart passes it to
+  /// `GameActivity` through a platform channel. `None` on desktop.
+  final String? manifestPath;
+
   const ProcessDto({
     required this.uuid,
     required this.instanceId,
+    this.manifestPath,
   });
 
   @override
-  int get hashCode => uuid.hashCode ^ instanceId.hashCode;
+  int get hashCode =>
+      uuid.hashCode ^ instanceId.hashCode ^ manifestPath.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1382,7 +1388,8 @@ class ProcessDto {
       other is ProcessDto &&
           runtimeType == other.runtimeType &&
           uuid == other.uuid &&
-          instanceId == other.instanceId;
+          instanceId == other.instanceId &&
+          manifestPath == other.manifestPath;
 }
 
 class ProcessEventDto {
