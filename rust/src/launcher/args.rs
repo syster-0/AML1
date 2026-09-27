@@ -82,6 +82,8 @@ pub fn build_launch_args(
     extra_jvm_args: &[String],
     quick_play: &QuickPlayOptions<'_>,
     rpc_addr: SocketAddr,
+    use_system_glfw: bool,
+    use_system_openal: bool,
 ) -> Result<LaunchArgs> {
     let cwd = dirs::instance_dir(resource_dir, instance_path);
     let natives = dirs::natives(resource_dir, version_jar_id);
@@ -100,6 +102,8 @@ pub fn build_launch_args(
         &info.libraries,
         java_arch,
         &theseus_jar,
+        use_system_glfw,
+        use_system_openal,
     )?;
 
     // Empty / whitespace must not enable Quick Play — MC may treat
@@ -190,6 +194,16 @@ pub fn build_launch_args(
     }
     if java_major >= 25 {
         jvm_args.push("--add-opens=jdk.internal/jdk.internal.misc=ALL-UNNAMED".into());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if use_system_glfw {
+            jvm_args.push("-Dorg.lwjgl.glfw.libname=libglfw.so".into());
+        }
+        if use_system_openal {
+            jvm_args.push("-Dorg.lwjgl.openal.libname=libopenal.so".into());
+        }
     }
 
     if !jvm_args.iter().any(|a| a == "-cp" || a == "-classpath") {
@@ -421,8 +435,10 @@ pub fn get_classpath(
     libraries: &[Library],
     java_arch: &str,
     theseus_jar: &str,
+    use_system_glfw: bool,
+    use_system_openal: bool,
 ) -> Result<String> {
-    let cache_key = format!("{resource_dir}\0{version_jar_id}\0{java_arch}\0{theseus_jar}");
+    let cache_key = format!("{resource_dir}\0{version_jar_id}\0{java_arch}\0{theseus_jar}\0{use_system_glfw}\0{use_system_openal}");
     if let Some(classpath) = CLASSPATH_CACHE
         .read()
         .ok()
@@ -477,6 +493,34 @@ pub fn get_classpath(
         } else {
             get_path_from_artifact(&lib.name)?
         };
+
+        #[cfg(target_os = "linux")]
+        {
+            let name_lower = lib.name.to_lowercase();
+            let rel_lower = rel.to_lowercase();
+            let is_native = lib.natives.is_some()
+                || name_lower.contains("natives")
+                || rel_lower.contains("natives")
+                || lib
+                    .downloads
+                    .as_ref()
+                    .and_then(|d| d.classifiers.as_ref())
+                    .is_some();
+
+            if use_system_glfw
+                && is_native
+                && (name_lower.contains("glfw") || rel_lower.contains("glfw"))
+            {
+                continue;
+            }
+            if use_system_openal
+                && is_native
+                && (name_lower.contains("openal") || rel_lower.contains("openal"))
+            {
+                continue;
+            }
+        }
+
         entries.push(libs_root.join(rel).to_string_lossy().to_string());
     }
 
