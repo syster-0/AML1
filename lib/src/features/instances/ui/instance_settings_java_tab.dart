@@ -156,6 +156,74 @@ class InstanceSettingsJavaTab extends StatelessWidget {
                 onChanged: controller.scheduleEnvVarsSave,
               ),
             ),
+            const SizedBox(height: 22),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              decoration: BoxDecoration(
+                color: tokens.colorBg.withValues(alpha: 0.35),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: tokens.colorSecondary.withValues(alpha: 0.25),
+                ),
+              ),
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '使用系统 GLFW（仅 Linux）',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: tokens.colorContrast,
+                            ),
+                          ),
+                        ),
+                        Switch(
+                          value: controller.useSystemGlfw,
+                          activeThumbColor: tokens.colorOnBrand,
+                          activeTrackColor: tokens.colorBrand,
+                          onChanged: controller.saving
+                              ? null
+                              : controller.setUseSystemGlfw,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Divider(
+                    height: 1,
+                    color: tokens.colorSecondary.withValues(alpha: 0.2),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '使用系统 OpenAL（仅 Linux）',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: tokens.colorContrast,
+                            ),
+                          ),
+                        ),
+                        Switch(
+                          value: controller.useSystemOpenal,
+                          activeThumbColor: tokens.colorOnBrand,
+                          activeTrackColor: tokens.colorBrand,
+                          onChanged: controller.saving
+                              ? null
+                              : controller.setUseSystemOpenal,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
         );
       },

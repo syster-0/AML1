@@ -505,16 +505,48 @@ pub async fn launch_instance(
     );
     let manifest_ms = manifest_started.elapsed().as_millis();
 
+    let (use_system_glfw, use_system_openal) = {
+        let env_str = instance
+            .environment_vars
+            .as_deref()
+            .or(defaults.environment_vars.as_deref());
+        if let Some(json_str) = env_str {
+            if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(json_str) {
+                let glfw = map
+                    .get("AML_SYSTEM_GLFW")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let openal = map
+                    .get("AML_SYSTEM_OPENAL")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                (glfw, openal)
+            } else {
+                (false, false)
+            }
+        } else {
+            (false, false)
+        }
+    };
+
     // Modern MC extracts natives into these subdirs at runtime.
     let natives_root = dirs::natives(&resource, &version_jar_id);
     for sub in ["java", "jna", "lwjgl", "netty"] {
         tokio::fs::create_dir_all(natives_root.join(sub)).await?;
     }
     #[cfg(target_os = "linux")]
-    if super::download::has_system_glfw() {
-        let target_glfw = natives_root.join("libglfw.so");
-        if target_glfw.exists() || target_glfw.is_symlink() {
-            let _ = std::fs::remove_file(&target_glfw);
+    {
+        if use_system_glfw {
+            let target_glfw = natives_root.join("libglfw.so");
+            if target_glfw.exists() || target_glfw.is_symlink() {
+                let _ = std::fs::remove_file(&target_glfw);
+            }
+        }
+        if use_system_openal {
+            let target_openal = natives_root.join("libopenal.so");
+            if target_openal.exists() || target_openal.is_symlink() {
+                let _ = std::fs::remove_file(&target_openal);
+            }
         }
     }
 
@@ -586,6 +618,8 @@ pub async fn launch_instance(
         &extra,
         &quick_play,
         rpc_server.address(),
+        use_system_glfw,
+        use_system_openal,
     )?;
     if fullscreen
         && !args
@@ -645,6 +679,9 @@ pub async fn launch_instance(
             env_map.insert(k, v);
         }
     }
+    // 净化内部配置标记，避免传递给 Minecraft 游戏子进程
+    env_map.remove("AML_SYSTEM_GLFW");
+    env_map.remove("AML_SYSTEM_OPENAL");
     args.env = env_map.into_iter().collect();
     args.wrapper_command = instance
         .wrapper_command

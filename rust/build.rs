@@ -17,15 +17,31 @@ fn build_java_jars() {
     let out_dir = dunce::canonicalize(PathBuf::from(env::var_os("OUT_DIR").unwrap())).unwrap();
 
     let jars_dir = out_dir.join("java").join("libs");
+    fs::create_dir_all(&jars_dir).unwrap();
     println!("cargo::rustc-env=JAVA_JARS_DIR={}", jars_dir.display());
+
+    let prebuilt_jar = PathBuf::from("java").join("theseus.jar");
+    let force_rebuild = env::var("AML_REBUILD_JAVA").map(|v| v == "1").unwrap_or(false);
+
+    if prebuilt_jar.is_file() && !force_rebuild {
+        fs::copy(&prebuilt_jar, jars_dir.join("theseus.jar")).unwrap();
+        return;
+    }
 
     let gradle_path = fs::canonicalize(
         #[cfg(target_os = "windows")]
         "java\\gradlew.bat",
         #[cfg(not(target_os = "windows"))]
         "java/gradlew",
-    )
-    .unwrap();
+    );
+
+    let Ok(gradle_path) = gradle_path else {
+        if prebuilt_jar.is_file() {
+            fs::copy(&prebuilt_jar, jars_dir.join("theseus.jar")).unwrap();
+            return;
+        }
+        panic!("Neither gradle wrapper nor prebuilt java/theseus.jar found");
+    };
 
     let mut build_dir_str = OsString::from("-Dorg.gradle.project.buildDir=");
     build_dir_str.push(out_dir.join("java"));
@@ -51,13 +67,17 @@ fn build_java_jars() {
         }
     }
 
-    let exit_status = cmd
-        .status()
-        .expect("Failed to wait on Gradle build");
+    let status_res = cmd.status();
+    let success = status_res.as_ref().map(|s| s.success()).unwrap_or(false);
 
-    if !exit_status.success() {
-        println!("cargo::error=Gradle build failed with {exit_status}");
-        exit(exit_status.code().unwrap_or(1));
+    if !success {
+        if prebuilt_jar.is_file() {
+            println!("cargo::warning=Gradle build failed, falling back to prebuilt java/theseus.jar");
+            fs::copy(&prebuilt_jar, jars_dir.join("theseus.jar")).unwrap();
+            return;
+        }
+        println!("cargo::error=Gradle build failed and no prebuilt jar available");
+        exit(status_res.ok().and_then(|s| s.code()).unwrap_or(1));
     }
 }
 

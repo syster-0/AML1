@@ -53,6 +53,8 @@ class InstanceSettingsController extends ChangeNotifier {
   bool overrideJvmArgs = false;
   bool overrideEnvVars = false;
   bool overrideHooks = false;
+  bool useSystemGlfw = false;
+  bool useSystemOpenal = false;
   bool fullscreen = false;
   bool saving = false;
   String? error;
@@ -141,10 +143,25 @@ class InstanceSettingsController extends ChangeNotifier {
       jvmArgsController.text =
           overrideJvmArgs ? (instance.extraJvmArgs ?? '') : defaultJvmArgs;
     }
+    final envJson = instance.environmentVars;
+    if (envJson != null && envJson.trim().isNotEmpty) {
+      try {
+        final map = jsonDecode(envJson) as Map<String, dynamic>;
+        useSystemGlfw = map['AML_SYSTEM_GLFW'] == '1' || map['AML_SYSTEM_GLFW'] == 'true';
+        useSystemOpenal = map['AML_SYSTEM_OPENAL'] == '1' || map['AML_SYSTEM_OPENAL'] == 'true';
+      } catch (_) {
+        useSystemGlfw = false;
+        useSystemOpenal = false;
+      }
+    } else {
+      useSystemGlfw = false;
+      useSystemOpenal = false;
+    }
     if (!envVarsFocusNode.hasFocus) {
-      overrideEnvVars = instance.environmentVars != null;
+      final envDisplay = envVarsToDisplay(instance.environmentVars);
+      overrideEnvVars = instance.environmentVars != null && envDisplay.trim().isNotEmpty;
       envVarsController.text = overrideEnvVars
-          ? envVarsToDisplay(instance.environmentVars)
+          ? envDisplay
           : defaultEnvVars;
     }
     preLaunchController.text = instance.preLaunchCommand ?? '';
@@ -165,6 +182,7 @@ class InstanceSettingsController extends ChangeNotifier {
     try {
       final map = jsonDecode(json) as Map<String, dynamic>;
       return map.entries
+          .where((entry) => entry.key != 'AML_SYSTEM_GLFW' && entry.key != 'AML_SYSTEM_OPENAL')
           .map((entry) => '${entry.key}=${entry.value}')
           .join('\n');
     } catch (_) {
@@ -174,14 +192,25 @@ class InstanceSettingsController extends ChangeNotifier {
 
   String? envVarsToJson(String text) {
     final trimmed = text.trim();
-    if (trimmed.isEmpty) return null;
     final map = <String, String>{};
-    for (final line in trimmed.split('\n')) {
-      final item = line.trim();
-      if (item.isEmpty) continue;
-      final index = item.indexOf('=');
-      if (index <= 0) continue;
-      map[item.substring(0, index).trim()] = item.substring(index + 1).trim();
+    if (trimmed.isNotEmpty) {
+      for (final line in trimmed.split('\n')) {
+        final item = line.trim();
+        if (item.isEmpty) continue;
+        final index = item.indexOf('=');
+        if (index <= 0) continue;
+        final k = item.substring(0, index).trim();
+        final v = item.substring(index + 1).trim();
+        if (k != 'AML_SYSTEM_GLFW' && k != 'AML_SYSTEM_OPENAL') {
+          map[k] = v;
+        }
+      }
+    }
+    if (useSystemGlfw) {
+      map['AML_SYSTEM_GLFW'] = '1';
+    }
+    if (useSystemOpenal) {
+      map['AML_SYSTEM_OPENAL'] = '1';
     }
     if (map.isEmpty) return null;
     return jsonEncode(map);
@@ -336,6 +365,27 @@ class InstanceSettingsController extends ChangeNotifier {
     }
   }
 
+  Future<void> setUseSystemGlfw(bool enabled) async {
+    useSystemGlfw = enabled;
+    notifyListeners();
+    await _saveSystemLibraries();
+  }
+
+  Future<void> setUseSystemOpenal(bool enabled) async {
+    useSystemOpenal = enabled;
+    notifyListeners();
+    await _saveSystemLibraries();
+  }
+
+  Future<void> _saveSystemLibraries() async {
+    final json = envVarsToJson(envVarsController.text);
+    if (json == null) {
+      await save(clearEnvironmentVars: true);
+    } else {
+      await save(environmentVars: json);
+    }
+  }
+
   Future<void> setOverrideEnvVars(bool enabled) async {
     overrideEnvVars = enabled;
     if (enabled && envVarsController.text.trim().isEmpty) {
@@ -346,7 +396,14 @@ class InstanceSettingsController extends ChangeNotifier {
     }
     notifyListeners();
     if (!enabled) {
-      await save(clearEnvironmentVars: true);
+      if (useSystemGlfw || useSystemOpenal) {
+        final map = <String, String>{};
+        if (useSystemGlfw) map['AML_SYSTEM_GLFW'] = '1';
+        if (useSystemOpenal) map['AML_SYSTEM_OPENAL'] = '1';
+        await save(environmentVars: jsonEncode(map));
+      } else {
+        await save(clearEnvironmentVars: true);
+      }
     } else {
       final json = envVarsToJson(envVarsController.text);
       if (json != null) {
