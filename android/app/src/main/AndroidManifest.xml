@@ -1,4 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <application
         android:label="aml"
         android:name="${applicationName}"
@@ -40,6 +43,20 @@
             android:taskAffinity="com.astral.aml.game"
             android:theme="@style/LaunchTheme">
         </activity>
+        <!-- Headless Forge/NeoForge install-processor host. One process hosts
+             one JVM, so each processor run kills :proc when finished. -->
+        <service
+            android:name=".game.ProcessorService"
+            android:exported="false"
+            android:process=":proc" />
+        <!-- Keeps the :game process at foreground priority while a game runs
+             (switching away must not let LMK kill the VM). The persistent
+             notification offers return-to-game and force-stop. -->
+        <service
+            android:name=".game.GameService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":game" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

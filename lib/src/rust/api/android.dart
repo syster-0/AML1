@@ -13,6 +13,14 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 Future<StagedJreDto?> probeStagedJre({required String filesDir}) =>
     RustLib.instance.api.crateApiAndroidProbeStagedJre(filesDir: filesDir);
 
+/// Select the lowest installed staged JRE whose major version satisfies
+/// `required_major`, scanning `<files_dir>/runtimes/<major>` plus the legacy
+/// `<files_dir>/jre` location. Returns `None` when nothing qualifies.
+Future<StagedJreDto?> selectStagedJre(
+        {required String filesDir, required int requiredMajor}) =>
+    RustLib.instance.api.crateApiAndroidSelectStagedJre(
+        filesDir: filesDir, requiredMajor: requiredMajor);
+
 /// Read-only information about a JRE staged in the app files dir.
 class StagedJreDto {
   /// Absolute JRE root path.

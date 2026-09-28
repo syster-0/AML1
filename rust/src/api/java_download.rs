@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use sysinfo::System;
+use tar::Archive;
 use tokio::fs;
 use tokio::process::Command;
+use xz2::read::XzDecoder;
 use zip::ZipArchive;
 
 use crate::config::AZUL_API_BASE_URL;
@@ -107,9 +109,27 @@ fn get_system_os() -> Result<&'static str> {
         Ok("macos")
     } else if cfg!(target_os = "linux") {
         Ok("linux")
+    } else if cfg!(target_os = "android") {
+        Ok("android")
     } else {
         Err(anyhow!("不支持的操作系统"))
     }
+}
+
+/// Android Bionic JRE17 下载源（PojavLauncherTeam CI 构建，公开直链）。
+///
+/// 仅提供 JRE17（Android 上 21 暂不提供），两个架构。
+/// 用户需要 21 时在 UI 上隐藏/置灰下载按钮。
+const ANDROID_JRE17_BASE: &str =
+    "https://github.com/PojavLauncherTeam/android-openjdk-build-multiarch/releases/download/jre17-ec28559";
+
+fn android_jre17_url(arch: &str) -> Option<String> {
+    let suffix = match arch {
+        "arm64" | "aarch64" => "arm64-20210825-release.tar.xz",
+        "arm" | "armeabi-v7a" => "arm-20210914-release.tar.xz",
+        _ => return None,
+    };
+    Some(format!("{ANDROID_JRE17_BASE}/jre17-{suffix}"))
 }
 
 /// 从版本字符串中提取主版本号

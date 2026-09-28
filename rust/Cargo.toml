@@ -22,6 +22,8 @@ sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
 zip = "0.6"
+tar = "0.4"
+xz2 = "0.1"
 regex = "1.0"
 sysinfo = "0.32"
 serde_json = "1.0"
@@ -62,3 +64,8 @@ windows = { version = "0.61", features = [
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+
+# Pojavexec is a separate Android-only cdylib (the GLFW/EGL bridge). It is
+# built on demand and is not part of the Cargokit-driven `rust_lib_aml` build.
+[workspace]
+members = [".", "pojavexec"]

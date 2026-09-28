@@ -36,6 +36,17 @@ class MainActivity : FlutterActivity() {
                     startActivity(intent)
                     result.success(null)
                 }
+                "killGame" -> {
+                    // Route the stop through the game-side service so it can
+                    // remove its recents task before the process dies; a bare
+                    // SIGKILL would leave a stale card behind. If no game is
+                    // running the service starts, kills itself and exits.
+                    val intent = Intent()
+                        .setClassName(packageName, "com.astral.aml.game.GameService")
+                        .setAction("com.astral.aml.game.KILL")
+                    startService(intent)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }

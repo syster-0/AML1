@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
+#[cfg(not(target_os = "android"))]
 use std::process::Stdio;
 #[cfg(not(target_os = "android"))]
 use std::time::Instant;
+#[cfg(not(target_os = "android"))]
 use tokio::process::Command;
 
 use crate::meta::minecraft::{get_path_from_artifact, VersionInfo};
@@ -87,15 +89,16 @@ pub async fn install_instance(
 
     if let Some(processors) = &info.processors {
         report(0.92, "Running loader processors…".into());
-        let java = java_path
-            .or(instance.java_path.clone())
-            .ok_or_else(|| anyhow!("java path required for Forge processors"))?;
         run_processors(
             &resource,
             &instance.path,
+            instance_id,
             &info,
             processors,
-            &java,
+            java_path
+                .or(instance.java_path.clone())
+                .as_deref()
+                .unwrap_or(""),
             &version_jar_id,
         )
         .await?;
@@ -109,12 +112,35 @@ pub async fn install_instance(
 pub async fn run_processors(
     resource_dir: &str,
     instance_path: &str,
+    instance_id: &str,
     info: &VersionInfo,
     processors: &[Processor],
     java_path: &str,
     version_jar_id: &str,
 ) -> Result<()> {
+    // Desktop spawns the `java` binary; Android runs each processor in an
+    // in-process JVM inside the dedicated `:proc` process and only needs the
+    // staged JRE home (selected like a game launch would).
+    #[cfg(not(target_os = "android"))]
     let java = dirs::java_executable(java_path)?;
+    #[cfg(target_os = "android")]
+    let (files_root, jre_home) = {
+        let files_root = std::path::Path::new(resource_dir)
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from(resource_dir));
+        let required_major = super::args::required_java_major(info);
+        let jre = crate::android::runtime::jre::select(
+            &files_root.to_string_lossy(),
+            required_major,
+        )
+        .ok_or_else(|| {
+            anyhow!("未找到可用的内置 Java 运行时（需要 Java {required_major}），无法运行 Forge 安装处理器。")
+        })?;
+        (files_root, jre.java_home)
+    };
+    let _ = java_path;
+    let _ = instance_id;
     let instance_dir = dirs::instance_dir(resource_dir, instance_path);
     let libraries = dirs::libraries(resource_dir);
     let client_jar = download::client_jar_path(resource_dir, version_jar_id);
@@ -163,23 +189,44 @@ pub async fn run_processors(
             .map(|a| substitute_processor_arg(a, &forge_data, &computed, resource_dir))
             .collect::<Result<Vec<_>>>()?;
 
-        let mut command = Command::new(&java);
-        command
-            .arg("-cp")
-            .arg(&cp)
-            .arg(&main_class)
-            .args(&args)
-            .current_dir(&instance_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        super::win_process::hide_console_window(&mut command);
-        let status = command
-            .status()
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut command = Command::new(&java);
+            command
+                .arg("-cp")
+                .arg(&cp)
+                .arg(&main_class)
+                .args(&args)
+                .current_dir(&instance_dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            super::win_process::hide_console_window(&mut command);
+            let status = command
+                .status()
+                .await
+                .with_context(|| format!("run processor {}", processor.jar))?;
+
+            if !status.success() {
+                anyhow::bail!("processor {} failed with {status}", processor.jar);
+            }
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let code = crate::android::processor::run_processor(
+                &files_root,
+                instance_id,
+                &instance_dir,
+                &jre_home,
+                &cp,
+                &main_class,
+                &args,
+            )
             .await
             .with_context(|| format!("run processor {}", processor.jar))?;
-
-        if !status.success() {
-            anyhow::bail!("processor {} failed with {status}", processor.jar);
+            if code != 0 {
+                anyhow::bail!("processor {} failed with exit code {code}", processor.jar);
+            }
         }
     }
     Ok(())
@@ -337,23 +384,32 @@ pub(crate) async fn prepare_launch(
     };
 
     #[cfg(target_os = "android")]
-    let java_major_detected = {
+    let (java_major_detected, android_jre_home) = {
         // The game runs inside an in-process HotSpot VM: there is no `java`
-        // binary to spawn. Validate the staged JRE layout directly instead.
+        // binary to spawn. Validate staged JRE trees directly and pick the
+        // lowest installed major version that satisfies the version manifest.
         let files_root = std::path::Path::new(&resource)
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| std::path::PathBuf::from(&resource));
-        let jre = crate::android::runtime::jre::probe(files_root.to_string_lossy().as_ref())
-            .ok_or_else(|| anyhow!("未找到可用的内置 Java 运行时，请先在设置中安装。"))?;
-        if jre.major_version < required_major {
-            anyhow::bail!(
-                "此 Minecraft 版本需要 Java {}，当前内置运行时为 Java {}。",
-                required_major,
-                jre.major_version
-            );
+        let files_root = files_root.to_string_lossy().into_owned();
+        match crate::android::runtime::jre::select(&files_root, required_major) {
+            Some(jre) => (jre.major_version, jre.java_home),
+            None => {
+                let installed =
+                    crate::android::runtime::jre::probe_all(&files_root)
+                        .into_iter()
+                        .map(|jre| jre.major_version.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                if installed.is_empty() {
+                    anyhow::bail!("未找到可用的内置 Java 运行时，请先在设置中安装。");
+                }
+                anyhow::bail!(
+                    "此 Minecraft 版本需要 Java {required_major}，已安装的内置运行时为 Java {installed}，请先安装 Java {required_major} 运行时。",
+                );
+            }
         }
-        jre.major_version
     };
     let _ = java_major_detected;
 
@@ -361,10 +417,18 @@ pub(crate) async fn prepare_launch(
         .await
         .unwrap_or_default();
     // Instance override → global defaults.
-    let memory = instance
+    #[cfg_attr(not(target_os = "android"), allow(unused_mut))]
+    let mut memory = instance
         .memory_mb
         .unwrap_or(defaults.memory_mb)
         .clamp(512, 131_072) as u32;
+    // Android has no desktop-style global default: an explicit per-instance
+    // override wins, otherwise size the heap from device RAM (the JVM shares
+    // the phone with the OS, GPU drivers and the launcher process).
+    #[cfg(target_os = "android")]
+    if instance.memory_mb.is_none() {
+        memory = android_default_heap_mb().await;
+    }
     // 空白覆盖不应遮蔽全局默认参数；shell_words 支持引号包裹含空格的值。
     let extra_source = instance
         .extra_jvm_args
@@ -397,6 +461,12 @@ pub(crate) async fn prepare_launch(
     for sub in ["java", "jna", "lwjgl", "netty"] {
         tokio::fs::create_dir_all(natives_root.join(sub)).await?;
     }
+
+    // Android: (re)stage the Bionic bridge libraries (GL4ES, LWJGL, OpenAL,
+    // pojavexec, JNA dispatch) from the APK into the version's natives dir.
+    // The Maven/LWJGL jar natives are glibc and cannot load on Bionic.
+    #[cfg(target_os = "android")]
+    crate::android::stage::ensure_bridge_natives(&natives_root).await;
 
     #[cfg(not(target_os = "android"))]
     let rpc_server = super::rpc::RpcServerBuilder::new().launch().await?;
@@ -484,6 +554,10 @@ pub(crate) async fn prepare_launch(
         &quick_play,
         rpc_address,
     )?;
+    #[cfg(target_os = "android")]
+    {
+        args.android_jre_home = Some(android_jre_home);
+    }
     if fullscreen
         && !args
             .game_args
@@ -608,6 +682,19 @@ pub async fn launch_instance(
         launch_started.elapsed().as_millis(),
     );
     Ok(meta)
+}
+
+/// Default game heap (MiB) for Android, derived from device RAM.
+///
+/// The HotSpot heap is only part of the footprint: metaspace, thread stacks,
+/// GL4ES/Mesa-side allocations, the emulator/GPU driver and the rest of the
+/// OS all compete for the same RAM. Reserve ~25% for the heap, bounded to
+/// [1 GiB, 4 GiB]. Per-instance overrides bypass this entirely.
+#[cfg(target_os = "android")]
+async fn android_default_heap_mb() -> u32 {
+    let total_kb = crate::api::java_download::get_max_memory().await.max(0) as u64;
+    let total_mb = total_kb / 1024;
+    ((total_mb / 4) as u32).clamp(1024, 4096)
 }
 
 /// Required Java major version from cached Minecraft version metadata.

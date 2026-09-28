@@ -56,6 +56,10 @@ pub struct LaunchArgs {
     pub env: Vec<(String, String)>,
     pub wrapper_command: Option<String>,
     pub post_exit_command: Option<String>,
+    /// Android only: absolute home of the staged Bionic JRE selected for this
+    /// launch. The in-process VM boots from this tree instead of spawning a
+    /// `java` binary; `None` on every other platform.
+    pub android_jre_home: Option<String>,
 }
 
 pub fn required_java_major(info: &VersionInfo) -> u32 {
@@ -294,6 +298,7 @@ pub fn build_launch_args(
         env: vec![],
         wrapper_command: None,
         post_exit_command: None,
+        android_jre_home: None,
     })
 }
 

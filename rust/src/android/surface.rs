@@ -1,131 +1,83 @@
-//! Game-process native surface handling (Phase 2).
+//! Game-process native surface handling (Phase 5).
 //!
-//! Bridges the ART `Surface` handed in by `GameSurfaceView` into a Rust-held
-//! `ANativeWindow`, then attaches it on a dedicated render thread. The thread
-//! software-fills each frame via `NativeWindow::lock` as a standing proof that
-//! the window is really acquired and composable — before any GL backend exists
-//! (Phase 5). Surface destroy/recreate must round-trip without crashing: the
-//! `Detach` event only releases the window, never tears down shared state, so a
-//! recreated surface can attach again.
+//! Bridges the ART `Surface` handed in by `GameSurfaceView` into an
+//! `ANativeWindow`, then injects that window into `libpojavexec.so`, which
+//! owns the EGL display and draws into it through GL4ES. The Rust side holds
+//! one reference to the window for the surface lifetime; pojavexec acquires
+//! its own references and releases them as surfaces are swapped.
+//!
+//! Surface destroy/recreate round-trips without crashing: detach hands NULL to
+//! pojavexec (it falls back to a 1x1 pbuffer), keeps no global state teardown,
+//! and a recreated surface can attach again.
 
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::OnceLock;
-use std::thread::{self, JoinHandle};
+use std::ffi::c_void;
+use std::sync::Mutex;
 
 use jni::sys::jobject;
-use ndk::native_window::{NativeWindow, NativeWindowBufferLockGuard};
+use ndk::native_window::NativeWindow;
 
-/// Whether the emulator/system actually attached our payload. Used only to log
-/// the observed frame count; not part of game logic.
-const TARGET_COLOR: u8 = 0x4c; // keep fill obvious against the dark theme
-
-enum Event {
-    /// A new `ANativeWindow` acquired from ART's `Surface`.
-    Attach(NativeWindow),
-    /// `surfaceDestroyed`: release the current window, keep the thread alive.
-    Detach,
-}
-
-/// Lazily spawned render thread. Owns the current window across attaches.
-static RENDER: OnceLock<Sender<Event>> = OnceLock::new();
-static THREAD: OnceLock<JoinHandle<()>> = OnceLock::new();
+/// The window owned by the current ART surface. `None` between destroy and
+/// recreate. Lock scope is deliberately tiny everywhere in this module.
+static WINDOW: Mutex<Option<NativeWindow>> = Mutex::new(None);
 
 fn android_log(tag: &str, msg: &str) {
-    // Reuse the raw log FFI declared in the parent `android` module.
     super::android_log(tag, msg);
-}
-
-fn render_loop(rx: Receiver<Event>) {
-    android_log("aml-gfx", "render thread started");
-    let mut window: Option<NativeWindow> = None;
-    while let Ok(event) = rx.recv() {
-        match event {
-            Event::Attach(win) => {
-                let (w, h) = (win.width(), win.height());
-                android_log(
-                    "aml-gfx",
-                    &format!("attach window {}x{} (@{:p})", w, h, win.ptr().as_ptr()),
-                );
-                // Draw once per attach: proves ownership + composability without
-                // a frame loop, which keeps the thread trivial until Phase 5.
-                draw(&win);
-                window = Some(win);
-            }
-            Event::Detach => {
-                // Dropping the `NativeWindow` releases the underlying
-                // `ANativeWindow`; the thread survives for the next attach.
-                android_log("aml-gfx", "detach window");
-                window = None;
-            }
-        }
-    }
-    android_log("aml-gfx", "render thread stopped");
-}
-
-/// Software-fill the window buffer with a solid color so the attach is
-/// externally visible. Requires the surface holder to have a known format.
-fn draw(win: &NativeWindow) {
-    match win.lock(None) {
-        Ok(mut guard) => fill(&mut guard),
-        Err(e) => android_log("aml-gfx", &format!("lock failed: {e}")),
-    }
-}
-
-fn fill(guard: &mut NativeWindowBufferLockGuard<'_>) {
-    let (w, h) = (guard.width(), guard.height());
-    let Some(bytes) = guard.bytes() else {
-        android_log("aml-gfx", "no contiguous byte view (unsupported format)");
-        return;
-    };
-    let n = bytes.len();
-    if n == 0 {
-        return;
-    }
-    // RGBA8888 layout: write (r, g, b, a). A flat stride over the whole buffer is
-    // enough for a solid fill; per-line padding is irrelevant for a uniform color.
-    let mut i = 0;
-    while i + 3 < n {
-        bytes[i] = std::mem::MaybeUninit::new(TARGET_COLOR);
-        bytes[i + 1] = std::mem::MaybeUninit::new(TARGET_COLOR);
-        bytes[i + 2] = std::mem::MaybeUninit::new(TARGET_COLOR);
-        bytes[i + 3] = std::mem::MaybeUninit::new(0xff);
-        i += 4;
-    }
-    android_log("aml-gfx", &format!("filled {}x{} ({n} bytes)", w, h,));
-}
-
-/// Ensures the render thread is running, returning the global event sender.
-fn sender() -> &'static Sender<Event> {
-    RENDER.get_or_init(|| {
-        let (tx, rx) = channel();
-        let handle = thread::Builder::new()
-            .name("aml-gfx".to_string())
-            .spawn(move || render_loop(rx))
-            .expect("spawn render thread");
-        THREAD.set(handle).ok();
-        tx
-    })
 }
 
 /// Called from `Java_..._GameBridge_nativeSurfaceCreated`.
 pub fn attach(env: *mut jni::sys::JNIEnv, surface: jobject) {
-    sender();
-    let win = unsafe { NativeWindow::from_surface(env, surface) };
-    match win {
-        Some(win) => {
-            if let Err(e) = sender().send(Event::Attach(win)) {
-                android_log("aml-gfx", &format!("attach send failed: {e}"));
-            }
-        }
-        None => android_log("aml-gfx", "ANativeWindow_fromSurface returned null"),
+    let Some(window) = (unsafe { NativeWindow::from_surface(env, surface) }) else {
+        android_log("aml-gfx", "ANativeWindow_fromSurface returned null");
+        return;
+    };
+    let ptr = window.ptr().as_ptr();
+    let (width, height) = (window.width(), window.height());
+
+    {
+        let mut guard = WINDOW
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(window);
     }
+
+    // First attach also registers the ART VM + app CallbackBridge. `env` here
+    // is from a Java frame, so the bridge's FindClass resolves app classes.
+    if let Some(vm) = super::bridge::art_vm() {
+        if !super::pojav_bridge::init_art(vm as *mut c_void, env as *mut c_void) {
+            android_log("aml-gfx", "failed to register ART VM with pojavexec");
+        }
+    } else {
+        android_log("aml-gfx", "attach before ART VM registration");
+    }
+
+    if !super::pojav_bridge::set_window(ptr as *mut c_void) {
+        android_log("aml-gfx", "failed to set bridge window");
+    }
+    if !super::pojav_bridge::notify_window() {
+        android_log("aml-gfx", "failed to notify bridge window");
+    }
+    android_log(
+        "aml-gfx",
+        &format!("window injected {width}x{height} (@{ptr:p})"),
+    );
 }
 
 /// Called from `Java_..._GameBridge_nativeSurfaceDestroyed`.
 pub fn detach() {
-    if let Some(tx) = RENDER.get() {
-        if tx.send(Event::Detach).is_err() {
-            android_log("aml-gfx", "detach send failed (thread gone?)");
-        }
+    {
+        let mut guard = WINDOW
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Dropping the NativeWindow releases our ANativeWindow reference.
+        *guard = None;
     }
+    // pojavexec switches its context to a pbuffer at the next swap and
+    // releases any reference it held to the destroyed window.
+    if !super::pojav_bridge::set_window(std::ptr::null_mut()) {
+        android_log("aml-gfx", "failed to clear bridge window");
+    }
+    if !super::pojav_bridge::notify_window() {
+        android_log("aml-gfx", "failed to notify bridge window");
+    }
+    android_log("aml-gfx", "window detached");
 }

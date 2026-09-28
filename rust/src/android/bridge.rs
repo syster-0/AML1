@@ -35,6 +35,11 @@ fn store_vm(vm: *mut JavaVM) {
     let _ = ART_VM.set(ArtVm(vm));
 }
 
+/// The ART `JavaVM*` captured at `:game` JNI_OnLoad, if registration happened.
+pub(crate) fn art_vm() -> Option<*mut JavaVM> {
+    ART_VM.get().map(|vm| vm.0)
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_astral_aml_game_GameBridge_nativeSurfaceCreated(
     env: JNIEnv,

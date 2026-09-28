@@ -258,15 +258,17 @@ class _InstanceStoreCore {
     return rust.listLoaderVersions(loader: loader, gameVersion: gameVersion);
   }
 
-  /// Probe the JRE staged at `<files>/jre` on Android; return its home path
-  /// when it satisfies [requiredMajor], otherwise null. The JRE is validated
-  /// in Rust without executing anything (no process spawn on this platform).
+  /// Select the lowest installed Android staged JRE that satisfies
+  /// [requiredMajor] (scanning `<files>/runtimes/<major>` plus the legacy
+  /// `<files>/jre`); return its home path, otherwise null.
   Future<String?> _resolveStagedAndroidJre(int requiredMajor) async {
     final filesDir = getIt<RuntimeState>().appDataDirectory.value;
     if (filesDir == null || filesDir.trim().isEmpty) return null;
-    final jre = await rust_android.probeStagedJre(filesDir: filesDir);
-    if (jre == null || jre.majorVersion < requiredMajor) return null;
-    return jre.javaHome;
+    final jre = await rust_android.selectStagedJre(
+      filesDir: filesDir,
+      requiredMajor: requiredMajor,
+    );
+    return jre?.javaHome;
   }
 
   /// Resolve a configured Java path for [requiredMajor] without auto-install.

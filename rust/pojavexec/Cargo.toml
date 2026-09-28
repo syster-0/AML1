@@ -1,0 +1,11 @@
+[package]
+name = "pojavexec"
+version = "0.1.0"
+edition = "2021"
+
+# The build script links the C sources directly into libpojavexec.so (the
+# name the Android GLFW stub hardcodes). The Rust library itself is empty.
+[lib]
+path = "src/lib.rs"
+
+# The build script invokes the NDK compiler directly; no build dependencies.

@@ -21,16 +21,42 @@ pub struct StagedJreDto {
 pub fn probe_staged_jre(files_dir: String) -> Option<StagedJreDto> {
     #[cfg(target_os = "android")]
     {
-        crate::android::runtime::jre::probe(&files_dir).map(|jre| StagedJreDto {
-            java_home: jre.java_home,
-            version: jre.version,
-            major_version: jre.major_version,
-            arch: jre.arch,
-        })
+        crate::android::runtime::jre::probe(&files_dir).map(StagedJreDto::from)
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = files_dir;
         None
+    }
+}
+
+/// Select the lowest installed staged JRE whose major version satisfies
+/// `required_major`, scanning `<files_dir>/runtimes/<major>` plus the legacy
+/// `<files_dir>/jre` location. Returns `None` when nothing qualifies.
+pub fn select_staged_jre(
+    files_dir: String,
+    required_major: u32,
+) -> Option<StagedJreDto> {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::runtime::jre::select(&files_dir, required_major)
+            .map(StagedJreDto::from)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (files_dir, required_major);
+        None
+    }
+}
+
+#[cfg(target_os = "android")]
+impl From<crate::android::runtime::jre::StagedJre> for StagedJreDto {
+    fn from(jre: crate::android::runtime::jre::StagedJre) -> Self {
+        StagedJreDto {
+            java_home: jre.java_home,
+            version: jre.version,
+            major_version: jre.major_version,
+            arch: jre.arch,
+        }
     }
 }

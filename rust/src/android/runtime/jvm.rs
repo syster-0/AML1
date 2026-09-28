@@ -31,6 +31,22 @@ static JRE: std::sync::OnceLock<LoadedJre> = std::sync::OnceLock::new();
 /// Boot the VM on the calling (game) thread, then invoke the Minecraft main
 /// class declared in [manifest].
 pub(super) fn boot(manifest: &LaunchManifest) -> Result<(), RuntimeError> {
+    // Apply the manifest environment before the VM (and before any LWJGL/GL
+    // initialization) reads it: renderer selection, GL ES version, native dir.
+    for (key, value) in &manifest.env {
+        std::env::set_var(key, value);
+    }
+
+    // Desktop parity: the game/processor working directory is the instance
+    // dir (`user.dir`). Without this, relative-path writes (log4j's `logs/`,
+    // Forge processor temp files) would land in `/`.
+    if let Err(error) = std::env::set_current_dir(&manifest.working_dir) {
+        return Err(RuntimeError::Jvm(format!(
+            "chdir {}: {error}",
+            manifest.working_dir
+        )));
+    }
+
     // 1) dlopen libjsig → libjli → libjvm from the JRE tree (RTLD_GLOBAL).
     let (loaded, create_jvm) = unsafe { loader::load(&manifest.jre_home) }?;
     let _ = JRE.set(loaded);
@@ -88,6 +104,22 @@ pub(super) fn boot(manifest: &LaunchManifest) -> Result<(), RuntimeError> {
     }
     log::write_line("aml-jvm: JNI_CreateJavaVM OK (OpenJDK HotSpot, not ART)");
 
+    // Register the HotSpot VM/GLFW class with pojavexec before any game code
+    // touches LWJGL. pojavexec is already mapped (the surface was injected at
+    // attach time); this resolves the stub's size callbacks and direct buffers.
+    // Headless runs (Forge/NeoForge install processors) never touch LWJGL, so
+    // they skip the bridge entirely.
+    if !manifest.headless
+        && !super::super::pojav_bridge::init_runtime(
+            pvm as *mut c_void,
+            penv as *mut c_void,
+        )
+    {
+        return Err(RuntimeError::Jvm(
+            "failed to register runtime VM with pojavexec".into(),
+        ));
+    }
+
     // 4) Run the Minecraft main class.
     let exit_code = match run_minecraft(penv, manifest) {
         Ok(()) => 0,
@@ -142,7 +174,10 @@ fn run_minecraft(
     Ok(())
 }
 
-/// Clear and summarize the pending JVM exception via `Throwable.toString`.
+/// Clear and summarize the pending JVM exception. `Throwable.toString` alone
+/// hides the causal chain (Forge's bootstrap wraps everything in an
+/// InvocationTargetException), so dump the full `printStackTrace` text via a
+/// StringWriter instead.
 fn describe_pending(env: &mut jni::JNIEnv) -> String {
     let throwable = match env.exception_occurred() {
         Ok(throwable) if !throwable.is_null() => throwable,
@@ -151,19 +186,37 @@ fn describe_pending(env: &mut jni::JNIEnv) -> String {
     if env.exception_clear().is_err() {
         return "Java exception (clear failed)".into();
     }
-    env.call_method(&throwable, "toString", "()Ljava/lang/String;", &[])
-        .ok()
-        .and_then(|value| value.l().ok())
-        .filter(|object| !object.is_null())
-        .and_then(|object| {
-            let message: jni::objects::JString = object.into();
-            // Convert inside this closure: the returned `JavaStr` borrows `env`
-            // and cannot outlive the closure body.
-            env.get_string(&message)
-                .map(|text| text.to_string_lossy().into_owned())
-                .ok()
-        })
-        .unwrap_or_else(|| "Java exception (no message)".into())
+    let trace = (|| -> Option<String> {
+        let sw = env.new_object("java/io/StringWriter", "()V", &[]).ok()?;
+        let pw = env
+            .new_object(
+                "java/io/PrintWriter",
+                "(Ljava/io/Writer;)V",
+                &[jni::objects::JValue::Object(&sw)],
+            )
+            .ok()?;
+        env.call_method(
+            &throwable,
+            "printStackTrace",
+            "(Ljava/io/PrintWriter;)V",
+            &[jni::objects::JValue::Object(&pw)],
+        )
+        .ok()?;
+        if env.exception_check().ok()? {
+            let _ = env.exception_clear();
+            return None;
+        }
+        let text = env
+            .call_method(&sw, "toString", "()Ljava/lang/String;", &[])
+            .ok()
+            .and_then(|value| value.l().ok())
+            .filter(|object| !object.is_null())?;
+        let text: jni::objects::JString = text.into();
+        env.get_string(&text)
+            .map(|s| s.to_string_lossy().into_owned())
+            .ok()
+    })();
+    trace.unwrap_or_else(|| "Java exception (stack trace unavailable)".into())
 }
 
 /// Construct `String[]` from the game argument tokens.

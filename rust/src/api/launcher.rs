@@ -445,6 +445,15 @@ pub async fn kill_instance(id: String) -> Result<(), String> {
 pub async fn list_running_processes() -> Result<Vec<ProcessDto>, String> {
     #[cfg(target_os = "android")]
     {
+        // A launcher restart loses the in-memory session table; rediscover
+        // any still-running :game process from the persisted session records
+        // before answering, so the UI never reports a live game as stopped.
+        if let Ok(resource) = state::resource_dir().await {
+            let files_root: &Path = Path::new(&resource)
+                .parent()
+                .unwrap_or(Path::new(&resource));
+            crate::android::launch::reconcile_remote_sessions(files_root).await;
+        }
         Ok(crate::android::launch::list_remote()
             .into_iter()
             .map(|m| ProcessDto {

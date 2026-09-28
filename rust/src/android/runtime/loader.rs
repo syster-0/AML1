@@ -159,9 +159,62 @@ pub(super) unsafe fn load(jre_root: &str) -> Result<(LoadedJre, CreateJavaVmFn),
         handles.push(h);
     }
     check_16k_alignment(Path::new(&format!("{jre_root}/lib/server/libjvm.so")));
-
-    // The JVM handle is the last loaded; resolve the symbol from it.
     let jvm = *handles.last().unwrap();
+
+    // Preload the remaining JDK JNI libraries by ABSOLUTE PATH in dependency
+    // order, all RTLD_GLOBAL. The app's linker namespace (clns-*) resolves
+    // DT_NEEDED entries by soname through its own search path, which contains
+    // the APK nativeLibraryDir (carrying a JDK 17 set of the same SONAMEs) but
+    // NOT `<jre>/lib`. Without preloading, e.g. libnio.so's `DT_NEEDED
+    // libnet.so` silently binds the JDK 17 APK copy, whose JNI code expects
+    // old class layouts (`InetAddress.preferIPv6Address`) and crashes the
+    // JDK 21 VM. Preloading the matching copies first makes every by-soname
+    // resolution land in the same JRE tree.
+    //
+    // Only core/runtime libs are listed: AWT/Swing/font libs are intentionally
+    // excluded (headless Minecraft does not use them, and libfreetype.so must
+    // keep resolving to the GL4ES/LWJGL bridge copy).
+    const JDK_PRELOAD: &[&str] = &[
+        "libverify",
+        "libjava",
+        "libzip",
+        "libjimage",
+        "libnet",
+        "libnio",
+        "libextnet",
+        "libprefs",
+        "libsctp",
+        "librmi",
+        "libmanagement",
+        "libmanagement_ext",
+        "libmanagement_agent",
+        "libinstrument",
+        "libdt_socket",
+        "libjdwp",
+        "libattach",
+        "libsyslookup",
+    ];
+    let mut preloaded = Vec::new();
+    for stem in JDK_PRELOAD {
+        let path = format!("{jre_root}/lib/{stem}.so");
+        if !Path::new(&path).exists() {
+            continue;
+        }
+        match load_rtl_global(&path) {
+            Ok(handle) => preloaded.push(handle),
+            Err(error) => {
+                // Non-fatal: not every JRE ships every entry, and unrelated
+                // optional components (e.g. management agents) must not block
+                // the VM. Core binding failures surface again at JNI use.
+                super::super::android_log(
+                    "aml-loader",
+                    &format!("optional preload {stem}.so failed: {error}"),
+                );
+            }
+        }
+    }
+    handles.extend(preloaded);
+
     let create_fn = dlsym(
         jvm,
         b"JNI_CreateJavaVM\0".as_ptr() as *const c_char,

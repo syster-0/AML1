@@ -278,6 +278,14 @@ mixin _InstanceStoreInstanceOps on _InstanceStoreCore {
   }
 
   Future<void> kill(String id) async {
+    if (Platform.isAndroid) {
+      // Kill through the game-side service first so it removes its recents
+      // task before dying; the Rust SIGKILL below stays as a fallback (a
+      // session from before the service existed has nothing listening).
+      await const MethodChannel(
+        'aml/launch',
+      ).invokeMethod<void>('killGame');
+    }
     await rust.killInstance(id: id);
     // Optimistic UI update; `finished` also clears when the OS exit is observed.
     if (runningIds.value.contains(id)) {

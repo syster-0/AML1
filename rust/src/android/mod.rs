@@ -16,7 +16,12 @@ pub(crate) mod bridge;
 // On hosts these Android-only modules compile but are never called.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) mod launch;
+pub(crate) mod lwjgl_repack;
+pub(crate) mod pojav_bridge;
+#[cfg(target_os = "android")]
+pub(crate) mod processor;
 pub(crate) mod runtime;
+pub(crate) mod stage;
 pub(crate) mod surface;
 
 use std::ffi::{c_int, c_void, CString};
@@ -31,6 +36,19 @@ pub(crate) struct JavaVM {
 
 const JNI_VERSION_1_6: c_int = 0x0001_0006;
 const ANDROID_LOG_INFO: c_int = 4;
+
+/// ART `JavaVM*` captured in the MAIN process. `:game` keeps its own handle in
+/// `bridge.rs`; the main process needs one to start `ProcessorService` from
+/// pure Rust during Forge/NeoForge installs. Stored as `usize` for Send/Sync —
+/// the pointer is process-lifetime and only ever handed back to JNI.
+#[cfg(target_os = "android")]
+static MAIN_ART_VM: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// The ART `JavaVM*` captured in the main process, if `JNI_OnLoad` ran there.
+#[cfg(target_os = "android")]
+pub(crate) fn main_art_vm() -> Option<*mut JavaVM> {
+    MAIN_ART_VM.get().map(|vm| *vm as *mut JavaVM)
+}
 
 #[link(name = "log")]
 unsafe extern "C" {
@@ -56,6 +74,8 @@ fn probe_branch() -> &'static str {
     // terminator tells us which process we are.
     if cmdline.split('\0').any(|part| part.ends_with(":game")) {
         ":game"
+    } else if cmdline.split('\0').any(|part| part.ends_with(":proc")) {
+        ":proc"
     } else {
         "main"
     }
@@ -75,8 +95,18 @@ pub extern "C" fn JNI_OnLoad(vm: *mut JavaVM, _reserved: *mut c_void) -> c_int {
     match branch {
         // `:game` process: install the GameBridge natives on the ART JVM.
         ":game" => bridge::register_natives(vm),
-        // Main process: FRB initializes via Dart; nothing extra here.
-        "main" => {}
+        // Main process: FRB initializes via Dart; capture the ART VM so the
+        // processor runner can start the `:proc` service without a Dart
+        // round-trip.
+        "main" => {
+            #[cfg(target_os = "android")]
+            {
+                let _ = MAIN_ART_VM.set(vm as usize);
+            }
+        }
+        // `:proc` hosts headless install processors; name-mangled JNI needs
+        // no registration and nothing here touches the ART VM afterwards.
+        ":proc" => {}
         _ => unreachable!("probe_branch returned a known constant"),
     }
     JNI_VERSION_1_6

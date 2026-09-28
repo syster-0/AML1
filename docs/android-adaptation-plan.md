@@ -1,7 +1,7 @@
 # AML 安卓适配方案（Rust 核心路线）
 
 > 创建日期：2026-09-24
-> 状态：调研完成，待启动
+> 状态：Phase 0–7 全部验收通过（JRE21/Fabric/Forge/NeoForge 均端到端验证，2026-09-27，见 7.1–7.3）；Phase 8+ 待评估
 > 决策前提：以 **Rust 为核心**做安卓适配，Kotlin 仅作薄壳承载，所有业务逻辑（启动、JVM 创建、桥接）放在 Rust。
 
 ---
@@ -210,37 +210,33 @@ Minecraft 使用桌面 OpenGL，安卓只有 OpenGL ES / Vulkan，必须通过�
 
 ### 5.2 模块拓扑与分层
 
-安卓专属代码全部收敛在 `rust/src/launcher/android/`，按**启动器编排 / 游戏运行时 / 运行时供应 / 渲染器 / 输入 / FFI 边界**六个关注点分模块：
+安卓专属代码收敛在主 crate 的 `rust/src/android/`（同一 cdylib 会被主进程与 `:game` 进程各自加载，`JNI_OnLoad` 按 `/proc/self/cmdline` 分流）。落地后的实际结构如下（相对原设计的偏差：`ffi/` 平铺为 `bridge.rs`/`surface.rs`；`vendor/`、`render/`、`input/` 子目录尚未建，JRE 供应暂由 `runtime/jre.rs` 承担，GL4ES 桥以独立 crate 承载——见 5.4(7)）：
 
 ```
-rust/src/launcher/android/
-├── mod.rs                  # 门面：对外只暴露 start / abort 等少量接口
-├── ffi/                    # FFI 边界层（唯一允许 #[no_mangle]）
-│   ├── bridge.rs           # Java_* JNI 入口，统一 catch_unwind
-│   └── surface.rs          # Surface ↔ ANativeWindow
-├── runtime/                # 游戏运行时：执行与生命周期
-│   ├── mod.rs              # Runtime / RuntimeHandle，启动编排
-│   ├── loader.rs           # 按 RuntimeLayout 绝对路径 dlopen + 16KB 检查（一等模块）
-│   ├── jvm.rs              # JNI_CreateJavaVM + 调 Minecraft main
-│   ├── launch_manifest.rs  # 启动清单结构与读写
-│   └── process.rs          # 槽位登记、退出回调、UDS 日志
-├── vendor/                 # 运行时供应：下载 / 校验 / 解压
-│   ├── jre.rs              # JRE 版本清单、校验、输出 runtime.json
-│   └── lwjgl.rs            # LWJGL 工件选择与 classpath 改写
-├── render/                 # 渲染器：可插拔后端
-│   ├── mod.rs              # RenderBackend trait + 注册表 / 选择策略
-│   └── gl4es.rs            # 首发唯一实做后端（zink/virgl 后期再加，不预埋空壳）
-└── input/                  # 输入（首发仅最小触控）
-    └── touch.rs
+rust/src/android/
+├── mod.rs                  # JNI_OnLoad + 按 /proc/self/cmdline 分流（main / :game）
+├── bridge.rs               # Java_* JNI 入口（registerNatives），捕获 ART JavaVM*
+├── surface.rs              # Surface ↔ ANativeWindow，attach 时注入 EGL 桥
+├── launch.rs               # LaunchManifest 构建：classpath 改写、LWJGL 属性、env
+├── pojav_bridge.rs         # dlopen libpojavexec.so 的动态绑定（双 VM 显式注册）
+└── runtime/
+    ├── mod.rs              # 游戏运行时编排
+    ├── loader.rs           # 绝对路径 dlopen libjsig → libjli → libjvm（RTLD_GLOBAL）
+    ├── jvm.rs              # JNI_CreateJavaVM + 应用 env + 调 Minecraft main
+    ├── jre.rs              # JRE 树定位/校验
+    └── log.rs              # 游戏 VM 日志 → UDS → 启动器
+
+rust/pojavexec/             # 独立 crate：build.rs 直接调 NDK clang 链接 C 源，
+├── c/                      #   产出 libpojavexec.so（GLFW stub 硬编码的库名）
+└── src/lib.rs              #   Rust 侧为空壳，符号全部由 C 导出
 ```
 
 **分层与依赖方向（只允许向下依赖）：**
 
 ```
-ffi/        → runtime/                 入口只做转换与兜底，不含业务
-runtime/    → vendor/ + render/       编排：先供应，再选后端，后启动 JVM
-render/     → （后端之间互不依赖）      靠 trait 隔离
-vendor/     → 现有 download/install    纯供应能力
+bridge/surface → runtime                 入口只做转换与兜底，不含业务
+runtime        → launch + pojav_bridge   编排：先供应，再注入桥，后启动 JVM
+pojavexec      → （独立 C 库）            Rust 只 dlopen，不静态链接
 ```
 
 **设计原则：**
@@ -256,11 +252,12 @@ vendor/     → 现有 download/install    纯供应能力
    }
    ```
 
-2. **运行时区分「供应」与「执行」**：`vendor/` 负责把 JRE/LWJGL 准备好并校验，`runtime/` 负责同进程启动与生命周期，两者不混在一个文件里。
-3. **FFI 边界收敛**：`#[no_mangle]` 与 panic 兜底只出现在 `ffi/`；内部模块全部返回 `Result`，不感知 JNI。
-4. **门面模式**：`android/mod.rs` 只暴露 `start(manifest) / abort(id)`，外部（含现有 process.rs）不直接引用内部子模块。
-5. **复用而非分叉**：现有 `args.rs` 产出的启动配置作为 `launch_manifest` 的输入，安卓侧只做平台改写（LWJGL 替换、渲染器注入），不重写版本/规则逻辑。
-6. **平台隔离**：除现有 `process.rs` 内一处 `#[cfg(target_os = "android")]` 分叉外，所有安卓专属代码都在该目录内，桌面构建完全不编译这些模块。
+   （注：GL4ES 路径实际未走该 trait——GL 上下文由 `libpojavexec.so` 的 EGL 桥在 HotSpot 侧建立，`RenderBackend` 留待 Zink 等需要 Rust 侧参与的后端再启用，不预埋空壳。）
+
+2. **运行时区分「供应」与「执行」**：JRE/LWJGL 准备好并校验（`runtime/jre.rs`、launch 清单组装），`runtime/` 负责同进程启动与生命周期，两者不混在一个文件里。
+3. **FFI 边界收敛**：`#[no_mangle]` 与 panic 兜底只出现在 `bridge.rs`/`surface.rs`；内部模块全部返回 `Result`，不感知 JNI。
+4. **复用而非分叉**：现有 `args.rs` 产出的启动配置作为 `launch.rs` 清单的输入，安卓侧只做平台改写（GLFW stub jar 前置、GL4ES 属性、env 注入），不重写版本/规则逻辑。
+5. **平台隔离**：`rust/src/android/` 与 `rust/pojavexec/` 仅面向 Android target，桌面构建不编译这些模块（`#[cfg(target_os = "android")]`）。
 
 ### 5.3 技术选型（具体 crate）
 
@@ -392,6 +389,29 @@ Surface 生命周期与 JVM 生命周期分离：`surfaceDestroyed` 只 detach �
 
 `JNI_OnLoad` 按 `/proc/self/cmdline` 分流：默认进程 → 初始化 FRB/启动器侧；`:game` 进程 → 只注册 GameBridge native 方法，不启动 FRB/Flutter。同一 cdylib 会进两个进程。
 
+#### (7) `libpojavexec.so` — Phase 5 的 EGL/输入桥（关键事实修正）
+
+**事实修正（Phase 5 调研结论，推翻原设想）：**
+
+1. PojavLauncher v3 路线**不存在「原生 libglfw.so + ANativeWindow 后端」**这种组件。真实结构是：Java 假 GLFW stub（`org.lwjgl.glfw` 全部假实现，window 指针伪造）+ `libpojavexec.so` 内的 EGL 桥（`pojavInit` → `eglCreateWindowSurface(ANativeWindow)`，GL 函数指针由 GL4ES 提供）。
+2. **归档的 `lwjgl3-glfw-java` stub 是 LWJGL 3.2.x 世代**，依赖的 `DynCallback`/`CallbackI.V` 在 LWJGL 3.3.0 已删除，对 MC 1.13+ 所需的 3.3.x **不可用**。3.3.1 的安卓 stub 是预编译 jar：`lwjgl-glfw-classes.jar`（PojavLauncher `v3_openjdk` 的 assets 内）。
+3. 3.3.1 的 native 契约**不是** 3.2.x 的 `nativeEgl*`，而是一组 C 符号 `pojavInit/pojavCreateContext/pojavMakeCurrent/pojavSwapBuffers/pojavSwapInterval/pojavSetWindowHint/pojavGetCurrentContext/pojavTerminate/...`（stub `GLFW` 经 dlsym 解析）+ 少量 JNI 方法（`nglfwSet*Callback`、`CallbackBridge.*`），且 stub 静态初始化硬编码 `System.loadLibrary("pojavexec")`。
+
+**决策：AML 自建 `libpojavexec.so`（`rust/pojavexec/` 独立 crate）**，只导出上述契约符号，不引入上游第二套 JVM 引导与 stdio 劫持。理由（与许可证无关，内部验证路径下直接用 GPL 组件合规）：
+
+- 上游 `libpojavexec.so` 是其整个原生层的打包（JVM 引导 + EGL 桥 + 输入桥 + OSMesa/Zink/Turnip 分支），整包引入会与 AML 已验收的 Rust `runtime/jvm.rs` 引导冲突，并带入大量走不到的死代码；
+- 但 EGL 桥核心（`EGL_BAD_SURFACE` 恢复、surface 销毁切 1×1 pbuffer、resize 状态机、GL4ES 尺寸回调）是上游多年踩坑成果，按内部验证路径**直接保留其 C 实现并裁剪**，不从零重写。
+
+**实现要点：**
+
+- **构建**：`build.rs` 直接调 NDK clang 链接 C 源产出 `libpojavexec.so`，不走 rustc cdylib 空壳（rustc 版本脚本的 `local: *` 会压过导出参数，whole-archive 拉入的 C 对象会被 `--gc-sections` 回收）。产物手动放入 jniLibs（x86_64 + arm64-v8a），与 JRE 部署同模式，不动 Gradle/cargokit。
+- **双 VM 注册**：上游依赖同进程两次 `JNI_OnLoad`（linker namespace 副作用）把桥同时挂到 ART 与 HotSpot，在 AML 的确定性引导里不可靠。改为导出 `pojav_bridge_on_art(vm, env)` / `pojav_bridge_on_runtime(vm, env)` 两个显式初始化入口：ART 侧在 surface attach 时调用，HotSpot 侧在 `JNI_CreateJavaVM` 成功后、游戏代码触碰 LWJGL 前调用（[jvm.rs](file:///home/kevin/code/AML/rust/src/android/runtime/jvm.rs)）。
+- **窗口注入**：`surface.rs` 在 attach 时把 `ANativeWindow*` 经 `pojav_set_bridge_window` 写入桥的全局状态，`pojavNotifyWindow` 通知下次 swap 重建 EGL surface；detach 传 NULL。EGL 上下文在 HotSpot 侧建立，Rust 不持有。
+- **Rust 侧动态绑定**：[pojav_bridge.rs](file:///home/kevin/code/AML/rust/src/android/pojav_bridge.rs) 用 `dlopen`/`dlsym` 一次性解析 4 个入口，主 crate 不静态链接该库。
+- **classpath/env 注入**（[launch.rs](file:///home/kevin/code/AML/rust/src/android/launch.rs)）：stub jar 前置于 classpath 顶部遮蔽桌面 `lwjgl-glfw-3.3.1.jar`；注入 `-Dorg.lwjgl.opengl.libname=libgl4es_114.so`；清单新增 `env` 字段携带 `POJAV_RENDERER=opengles`、`LIBGL_ES=2`、`POJAV_NATIVEDIR=<natives>`，由 `jvm.rs` 在建 VM 前 `set_var`。
+- **ART 侧 CallbackBridge**：`android/app/src/main/java/org/lwjgl/glfw/CallbackBridge.java`（包名须与 stub 期望一致）承接 Android→桥的回调；触摸接线属 Phase 6。
+- **natives**：GL4ES（`libgl4es_114.so`）、OpenAL Soft（`libopenal.so`）、LWJGL natives（`liblwjgl*.so`、`libfreetype.so`）取 x86_64/arm64 预编译产物，放游戏 natives 目录。若 LWJGL 3.3.1 jar 与预编译 natives 出现 `org.lwjgl.system` 版本签名不匹配，需用 NDK 从 LWJGL 3.3.1 源码重建 natives。
+
 ### 5.5 启动时序
 
 ```
@@ -414,11 +434,15 @@ GameSurfaceView.surfaceCreated
   → nativeSurfaceCreated(surface)               # ANativeWindow_fromSurface + acquire，投递 AttachWindow
 
 runtime 线程（非 UI、非 FRB）
+  → 应用清单 env（POJAV_RENDERER / LIBGL_ES / POJAV_NATIVEDIR）
   → loader: libjsig → libjli → libjvm → 依赖库
   → JNI_CreateJavaVM(HotSpot)                   # 此线程成为 MC main
+  → pojav_bridge::init_runtime(vm, env)          # EGL/输入桥注册 HotSpot VM（Phase 5）
   → 设置游戏 VM System.out/err → UDS
-  → RenderBackend.attach_window(ANativeWindow)
-  → CallStaticVoidMethod(Minecraft main)        # 阻塞直到退出
+  → CallStaticVoidMethod(Minecraft main)        # 阻塞直到退出；GL 上下文由桥在 HotSpot 侧建
+
+surface attach（可先于/后于 JVM 创建）
+  → pojav_bridge::init_art + set_window(ANativeWindow)   # 桥持窗口，glfwInit 时建 EGL surface
 
 surfaceDestroyed
   → nativeSurfaceDestroyed → DetachWindow       # JVM 仍在
@@ -468,16 +492,16 @@ Minecraft 本身是 Java，游戏 classpath 上的 **LWJGL Java 类**（GLFW/inp
 
 ## 七、分阶段计划
 
-| 阶段 | 内容 | 验收 |
-|---|---|---|
-| 0 | cargokit aarch64/x86_64，Rust so 进 APK，16KB 对齐，`JNI_OnLoad` 按 cmdline 分流探测 | 主进程 Flutter 正常；logcat 有 Rust 日志 |
-| 1 | `GameActivity` + `:game` + `taskAffinity`，**不**启动 Flutter engine | 最近任务两张卡片；`ps` 可见两个进程 |
-| 2 | ART JNI → Rust → `ANativeWindow`；Surface destroy/recreate 不崩 | 旋转/锁屏后能重新 attach |
-| 3 | `loader.rs` + `libjvm.so` + `JNI_CreateJavaVM` + Hello main；日志走 UDS | 游戏进程里跑的是 **OpenJDK 而非 ART**；启动器可见 Hello 输出 |
-| 4 | LaunchConfig → Android Adapter → 写清单 → 调 Minecraft main（可先黑屏/崩在 GL） | 游戏主类执行，classpath 被加载 |
-| 5 | LWJGL 安卓 backend + GL4ES + 绑定 ANativeWindow | **进入 MC 主菜单（路线成立）** |
-| 6 | 最小触控转视角 | 能进世界操作 |
-| 7 | Java 21/25、内存策略、Forge/Fabric 回归 | 现代版本 + 整合包可玩 |
+| 阶段 | 内容 | 验收 | 状态 |
+|---|---|---|---|
+| 0 | cargokit aarch64/x86_64，Rust so 进 APK，16KB 对齐，`JNI_OnLoad` 按 cmdline 分流探测 | 主进程 Flutter 正常；logcat 有 Rust 日志 | ✅ |
+| 1 | `GameActivity` + `:game` + `taskAffinity`，**不**启动 Flutter engine | 最近任务两张卡片；`ps` 可见两个进程 | ✅ |
+| 2 | ART JNI → Rust → `ANativeWindow`；Surface destroy/recreate 不崩 | 旋转/锁屏后能重新 attach | ✅ |
+| 3 | `loader.rs` + `libjvm.so` + `JNI_CreateJavaVM` + Hello main；日志走 UDS | 游戏进程里跑的是 **OpenJDK 而非 ART**；启动器可见 Hello 输出 | ✅ |
+| 4 | LaunchConfig → Android Adapter → 写清单 → 调 Minecraft main（可先黑屏/崩在 GL） | 游戏主类执行，classpath 被加载 | ✅ |
+| 5 | LWJGL 安卓 backend + GL4ES + 绑定 ANativeWindow | **进入 MC 主菜单（路线成立）** | ✅ |
+| 6 | 最小触控转视角 | 能进世界操作 | ✅ |
+| 7 | Java 21/25、内存策略、Forge/Fabric 回归 | 现代版本 + 整合包可玩 | ✅ JRE21（1.21.1）、Fabric 0.19.5、Forge 52.1.14、NeoForge 21.1.252（2026-09-27，见 7.3） |
 | 8 | Zink / VirGL、GPU 黑名单与 fallback | 图形后端韧性 |
 | 9 | Boat 路线（LWJGL2）覆盖 1.12 及更早 | 老版本可启动 |
 | 10 | 完整输入系统（虚拟鼠标、按键映射、键鼠/手柄） | 触控体验完善 |
@@ -486,7 +510,55 @@ Minecraft 本身是 Java，游戏 classpath 上的 **LWJGL Java 类**（GLFW/inp
 
 阶段 0–5 是核心技术关，主菜单即证明路线成立。**「MC main 跑起来」（阶段 4）与「进主菜单」（阶段 5）必须拆开**：进菜单失败时，要能区分是 JVM 问题、classpath 问题还是 GL 问题。
 
-**许可拍板须在阶段 4 前完成**（见第八节），它决定阶段 4/5 的工期数量级。
+~~许可拍板须在阶段 4 前完成~~ → 已在 Phase 5 开工前拍板为**内部验证路径**（见第八节第 1 条）；对外发布前需在路径 A/B 间终拍。
+
+### 7.1 实施进度快照（2026-09-25）
+
+| 阶段 | 实际结果（模拟器 x86_64 验收） |
+|---|---|
+| 0 | `librust_lib_aml.so` 打入 APK 双 ABI；logcat 见 `JNI_OnLoad branch=main`；主进程 Flutter 渲染正常。cargokit 已适配 Flutter 3.44（读 `target-platform` 属性）；reqwest 换 rustls 解决安卓 OpenSSL 交叉编译 |
+| 1 | `com.astral.aml` 与 `com.astral.aml:game` 双进程在线；最近任务两张卡片（独立 taskAffinity + singleTask）；`:game` 分支 JNI_OnLoad 日志干净 |
+| 2 | `GameBridge`/`GameSurfaceView` 就位；ANativeWindow attach 填色渲染成功；锁屏 detach / 解锁 re-attach 无崩溃。教训：JNI 方法首参须直传 `JNIEnv` 指针；Kotlin external fun 必须放 `object`，不能放 companion |
+| 3 | `:game` 进程内 dlopen JRE 树，`JNI_CreateJavaVM` 拉起 **OpenJDK HotSpot 17**（非 ART），Hello main 执行，日志走 UDS。关键根因：boot class path 由 libjvm.so 位置推导，而非 `-Djava.home` |
+| 4 | MC 1.20.1 主类 `net/minecraft/client/main/Main` 在 HotSpot 上真实执行，45 条 classpath 生效，推进到渲染层后按计划边界停在 `RenderSystem` 初始化（崩在 GL 属预期）。修复：UDS 日志自死锁、`-cp` 需转 `-Djava.class.path=`、JRE 树缺 `lib/tzdb.dat`（生产 JRE 分发必须包含） |
+| 5 | ✅ **2026-09-25 验收通过**：MC 1.20.1 主菜单完整渲染（全景背景、按钮、splash），EGL 上下文建在 Rust 注入的 ANativeWindow 上，GL4ES 翻译 + 着色器编译 + 贴图图集全部工作。联调修复两处：`pojavNotifyWindow` 在 `br_setup_window` 未初始化（pojavInit 前 surface 先 attach）时空调用 → SIGSEGV，已加 NULL 保护（上游 setupBridgeWindow 本有此保护，裁剪时漏掉）；HotSpot `System.loadLibrary("pojavexec")` 只搜 `java.library.path`，需把 `libpojavexec.so` 同时放进 natives 目录（双副本靠 `POJAV_ENVIRON` env 共享状态）。另补 `bridge_window.c` 缺 `stdlib.h`（getenv）。已知噪音：LWJGL 3.3.3-snapshot jar 与预编译 natives 版本签名告警（非致命） |
+| 6 | ✅ **2026-09-26 验收通过**：主菜单点按（单人游戏 → 创建新的世界）→ 进世界 → 滑动转视角（画面明显旋转）→ 返回键=ESC 打开暂停菜单（grab 自动解除）→ 菜单点按「回到游戏」恢复抓取，全链路无崩溃。实现：`GameSurfaceView.onTouchEvent` 按 `CallbackBridge.isGrabbing()` 分流——非抓取=虚拟光标（绝对定位，点按=左键点按、按住超 slop=左键拖拽），抓取=相对增量驱动无界虚拟光标（×0.5 灵敏度），事件直送 pojavexec RegisterNatives 入口（无 Rust 往返）；`surfaceChanged` 补送 `nativeSendScreenSize`（此前缺调用，顺带修正了窗口逻辑尺寸）；`GameActivity` 拦截返回键映射 `GLFW_KEY_ESCAPE`。**关键 bug**：裁剪上游 `input_bridge_v3.c` 时，`send_*` 系列函数漏声明 `(JNIEnv*, jclass)` 前缀——经 RegisterNatives 注册的函数 JNI ABI 照样前送这两个参数，缺失导致参数整体错位，首次点击即 SIGSEGV（`send_mouse_button` 把 env 指针截断当按钮序号索引 `mouseDownBuffer`）。另：旧 `:game` 进程存活时 `LAUNCH_SINGLE_TASK` 拉起 `GameActivity` 不走 `onCreate`，新 Intent 需 `onNewIntent` 承接（重启语义 Phase 12 前再定） |
+
+Phase 5 拆为三个可验收小步：**p5-artifacts**（natives + stub jar 部署到设备 `components/lwjgl3/`）→ **p5-classpath**（stub jar 前置 + LWJGL/GL4ES 属性与 env 经清单传递）→ **p5-window**（EGL 桥双 VM 注册 + ANativeWindow 注入）。三步均已落地并通过端到端验收。
+
+### 7.2 Phase 7 进度快照（2026-09-27，模拟器 x86_64）
+
+**验收结果**：MC 1.21.1（JRE21）进标题、建世界、触控转视角全链路通过；1.20.1（JRE17）进世界 + 转视角回归通过（懒加载桥在系统 loader 与旧运行时均正常）；**Fabric Loader 0.19.5 + 1.21.1 进标题、建世界、触控转视角通过**（游戏类均在 `knot//` 类加载器下执行，日志零 `already loaded`/`Failed to locate library`；唯一噪音为既有无害 `libflite.so` Narrator 缺失）。
+
+关键修复（均有实证）：
+
+1. **JRE21 `NoSuchFieldError: preferIPv6Address`（linker namespace 同名库冲突）**。App linker namespace `clns-9` 的搜索路径含 APK `nativeLibraryDir`（整套 JDK17 .so）但**不含** `<jre>/lib`；RTLD_GLOBAL dlopen `<jre21>/lib/libnio.so` 时，Bionic 按 SONAME 解析 `DT_NEEDED libnet.so` 命中 APK 内旧 JDK17 版（含 `preferIPv6Address` 字段），而 Java 类是 JDK21 布局 → 崩。修复：`loader.rs` 在 `JNI_CreateJavaVM` 前按依赖顺序用**绝对路径 RTLD_GLOBAL** 预加载 JDK 核心库（常量 `JDK_PRELOAD`：libverify/libjava/libzip/libjimage/libnet/libnio/libextnet/…，约 19 个；文件不存在跳过、加载失败仅 log）。刻意**排除 AWT/Swing/font**——libfreetype 必须继续解析到 LWJGL 桥接版。注意先捕获 `let jvm = *handles.last().unwrap()` 再 preload（handle 也进同一 vec）。
+2. **Fabric `UnsatisfiedLinkError: Native Library liblwjgl.so already loaded in another classloader`（双 loader 初始化冲突）**。Fabric Knot 用自己的 URLClassLoader 加载 LWJGL；此前 `pojav_bridge_on_runtime()` 在 `CreateJavaVM` 后立即（裸线程、系统 loader）`FindClass("org/lwjgl/glfw/GLFW")` 并读取 `keyDownBuffer/mouseDownBuffer` 静态字段——**读静态字段会触发类初始化**，使 stub GLFW 及 LWJGL 核心 native 绑定在系统 loader；Knot 游戏 loader 再加载即被 JDK 拒绝。修复（`input_bridge_v3.c`）：`pojav_bridge_on_runtime` 只缓存 `JavaVM*`；新增 `pojav_ensure_runtime_classes(JNIEnv*)`（once guard，失败可重试），在 `pojavInit()`（stub `glfwInit()` 的 Java 帧内，env 沿帧找到正确 loader——vanilla=系统、Fabric=Knot）里首次解析 GLFW 类/方法/buffer；`pojavPumpEvents`、`nativeSetWindowAttrib` 入口补 ensure。FindClass/GetStaticMethodID/GetStaticFieldID 不初始化类，只有 GetStaticObjectField 会。
+3. **LWJGL 库定位**：JVM 参数加 `-Dorg.lwjgl.librarypath=<natives>`（与 `-Djna.boot.library.path` 并列），Knot loader 下 LWJGL 按绝对路径 dlopen，不再依赖 `findLibrary()` 回退。
+4. **native staging 产品化**：新建 `rust/src/android/stage.rs`（`ensure_bridge_natives()`：解析 `/proc/self/maps` 定位 APK nativeLibraryDir，按 size 把 10 个桥接库复制进实例 natives；注意 maps 匿名行无第 6 字段，`nth(5)` 必须 `let Some else continue`），由 `install.rs` 创建 natives 目录后调用。AGP 会 strip jniLibs 产物（体积变小，功能正常）。
+5. **桥接库进 jniLibs（x86_64）+ arm64 libjnidispatch**：gl4es/openal/lwjgl*/pojavexec/Bionic JNA 7.0.0（自编译，官方 jar 内是 glibc）入包；libfreetype 必须用 LWJGL 版（795216 B）而非 AWT 版（SONAME 相同）。arm64 仅 libjnidispatch 就绪，其余桥接库待供应。
+6. **pojavexec 构建**：flutter/cargokit 只构建根包，`pojavexec` crate 需手动 `cargo build -p pojavexec --target <triple>`（`CC` 必须显式指向 NDK clang wrapper，build.rs 只读 `CC` 不读 `CC_<target>`；API 26，r28c），产物在 `target/<triple>/debug/build/pojavexec-*/out/libpojavexec.so`，手动复制进 `jniLibs/<abi>/` 后重新打包。已给 build.rs 补 `cargo:rerun-if-changed=c/<src>`，C 改动不再被 cargo 缓存吞掉。
+
+### 7.3 Phase 7 续：Forge 回归快照（2026-09-27，模拟器 x86_64）
+
+**验收结果**：Forge 1.21.1-52.1.14 端到端通过——标题界面（"Forge 52.1.14，2 个 Mod 已加载"）→ 单人游戏 → 创建新的世界 → 世界生成 → 进世界第一人称渲染完整。回归未受影响：Vanilla 1.21.1 标题 ✓、Fabric 1.21.1 标题 ✓、Vanilla 1.20.1（JRE17）标题 ✓（均走旧 stub 前置路径）。
+
+**安装链路（f1–f6）**：Forge/NeoForge 的 install_profile.json 带 `processors`（下载 jar、解 lzma、重生成 client/slim jar），桌面版是 spawn 外部 `java` 进程；安卓没有可 exec 的 java，改为 **`:proc` 独立进程内嵌 HotSpot 跑 processor**：`rust/src/android/processor.rs` 复用 launch 清单（headless 模式——`jvm.rs` 跳过 pojav native 注册与 surface 等待，`chdir` 到实例目录），主进程靠 `JNI_OnLoad` 捕获的 ART `JavaVM*`（`mod.rs::MAIN_ART_VM`）直接 `StartService` 拉起 `ProcessorService`（:proc，AndroidManifest 已声明）。`install.rs` 按 `#[cfg(target_os)]` 分流；processor 的 JRE 用 `runtime/jre::select` 按版本所需 major 选取。数据解析沿用既有修复：**AML 自算的绝对路径（MINECRAFT_JAR/ROOT/LIBRARY_DIR）不进 resolve_data_value**，否则被当作 Forge 的 `/relative` 语法二次拼前缀。
+
+**JPMS 冲突与逐模块重打包（f7 核心，新文件 `rust/src/android/lwjgl_repack.rs`）**：
+
+- 根因：Forge ≥1.21 由 `net.minecraftforge.bootstrap.ForgeBootstrap` 启动，`SecureModuleFinder.of(...)` 把 `java.class.path` 的**每个 jar 都变 JPMS 模块**。胖 stub `lwjgl-glfw-classes.jar` 无 `Automatic-Module-Name` → 按文件名派生自动模块 `lwjgl.glfw.classes` 导出全部包，与真 `org.lwjgl.glfw` 显式模块（MR jar，module-info 在 `META-INF/versions/9`）包导出冲突 → `ResolutionException: Modules lwjgl.glfw.classes and org.lwjgl.glfw export package org.lwjgl.glfw ...`。
+- 方案：**不再整个 stub jar 前置**，而是逐模块重打包——复制每个真 org.lwjgl jar 的全部条目（MANIFEST/module-info 原样保留），类被 stub 覆盖的用 stub 字节替换、模块内缺失的 stub 类增补进去；**`android/util` 折叠进 glfw 模块 jar**（全 stub 仅 `org.lwjgl.glfw.GLFW` 引用它，放 extras 会因模块不互相 read 而 `IllegalAccessError`）；剩余孤儿包（javax/annotation、org/lwjgl/input、util/*、nanovg 等 10 个）进一个补充自动模块 `lwjgl-android-extras.jar`。
+- 触发门控 `is_modular_loader_main`（main_class 含 `minecraftforge.bootstrap`/`bootstraplauncher`/`neoforged`），仅模块化加载器走 repack，vanilla/Fabric 路径不变；NeoForge 已由同机制端到端验证。
+- 缓存：`files/components/lwjgl3/patched/*.jar` + `.sig` sidecar，sig 含 `REPACK_VERSION=2` 与输入文件 len+mtime（repack 逻辑变更必须 bump 版本号，否则设备缓存不失效）。
+- 测试注意：`mod android` 被 `#[cfg(target_os="android")]` 门控，host `cargo test` 跑不到该模块测试；本地验证用 scratch crate（复制源码 + 替换 `classpath_separator`）跑 fixture 断言。
+
+**NeoForge 端到端（2026-09-27 补验）**：NeoForge 1.21.1-21.1.252 全流程通过——实例创建 → 安装（10 个 processors 经 :proc 进程）→ 启动 → 标题界面（模组按钮可见）→ 创建新的世界 → 世界生成 → 进世界第一人称渲染。两处新修复：
+
+1. **JNI_CreateJavaVM 双元素选项（rc=-1 根因）**：NeoForge version JSON 的 JVM args 以**两元素分离形式**携带 `-p <module-path>`、`--add-modules ALL-MODULE-PATH`、`--add-opens java.base/...=<mod>`、`--add-exports ...`。`JNI_CreateJavaVM` 逐个处理 option 字符串、不会把下一个元素当值消费，未识别的裸字符串直接 rc=-1。修复（`launch.rs` `build_manifest`）：通用化合并——`VALUE_OPTS` 列表（`-p`/`--module-path`/`--add-modules`/`--add-opens`/`--add-exports`/`--add-reads`/`--patch-module`/`--limit-modules`）遇到即消费下一元素合并为 `--opt=value`（`-p` 归一为 `--module-path`）。
+2. **安装中断残留 `.amlpart`**：`http_download.rs` 下载经 `.amlpart` 临时文件（sha1 校验后 rename），模拟器崩溃中断后残留导致 processor jar 缺失（`read_jar_main_class` ENOENT → "No such file or directory (os error 2)"）。点「重试」重新安装即补完，无需额外处理。
+
+另：模拟器稳定性经验——NVIDIA 混合显卡 Wayland 主机上 `-gpu swiftshader_indirect` 反复 SIGSEGV（qemu-system-x86_64 core dump），必须 `-gpu host` + `pm disable com.google.android.apps.wellbeing`（Digital Wellbeing ANR 弹窗是崩溃表象之一）。
 
 ---
 
@@ -497,6 +569,8 @@ Minecraft 本身是 Java，游戏 classpath 上的 **LWJGL Java 类**（GLFW/inp
    - B：自研 LWJGL Android backend（仅用 MIT/BSD/BSD-3 组件：GL4ES、Mesa、ANGLE），许可干净但工期大增；
    - 内部验证：本机跑不分发 GPL 组件，只证路线、不能发 Release。
    按「源码 / jar / so / 静态链接 / 动态链接 / 构建脚本」逐项清点，维护 NOTICE / THIRD_PARTY_LICENSES，而不是一句话定性。
+
+   **已拍板（2026-09，Phase 5 开工前）：走「内部验证」路径**——本地引入开源组件（含 GPL 的 GLFW stub jar、EGL 桥 C 实现与预编译 natives，外加 OpenAL Soft），仅本机/模拟器验证，**不分发、不发 Release**。含义：Phase 5 代码与产物不进任何对外构建；将来要对外发布时，必须在路径 A（整体 GPL-3.0）与路径 B（自研替换 GPL 组件）之间终拍，并先清理仓库中的 GPL 工件。
 2. **从 `libjli` 取 `JNI_CreateJavaVM`（事实错误）**：必须从 `libjvm.so`（`lib/server/libjvm.so`）取，路径由 RuntimeLayout 描述。
 3. **ART JNIEnv 漏进游戏 VM**：两套 VM 严格隔离；ffi 只做转换，游戏逻辑只用 HotSpot env。
 4. **在 UI 线程调 `JNI_CreateJavaVM`**：必须在专门游戏线程，否则 UI 线程变 MC 主线程直接 ANR。
