@@ -471,7 +471,14 @@ async fn ensure_java_home_executables(_java_home: &Path) -> Result<()> {
 
 /// 获取默认的 Java 安装目录
 async fn get_default_java_dir(app_data_dir: &str) -> PathBuf {
-    Path::new(app_data_dir).join("java")
+    #[cfg(target_os = "android")]
+    {
+        Path::new(app_data_dir).join("runtimes")
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Path::new(app_data_dir).join("java")
+    }
 }
 
 /// 准备Java安装目录
@@ -483,19 +490,40 @@ async fn prepare_java_installation(
     let java_versions_dir = get_default_java_dir(app_data_dir).await;
 
     on_progress(0.1, "获取 Java 版本信息".to_string()).await;
-    let packages = fetch_java_packages(java_version).await?;
 
-    if packages.is_empty() {
-        return Err(anyhow!(
-            "未找到 Java {} 版本，系统: {}，架构: {}",
-            java_version,
-            get_system_os()?,
-            get_system_arch()
-        ));
+    #[cfg(target_os = "android")]
+    {
+        if java_version != 17 {
+            return Err(anyhow!("Android 暂仅支持 Java 17，21+ 请等待后续支持"));
+        }
+        let url = android_jre17_url(get_system_arch()).ok_or_else(|| {
+            anyhow!("Android 不支持当前架构: {}", get_system_arch())
+        })?;
+        Ok((
+            java_versions_dir,
+            JavaPackage {
+                download_url: url,
+                name: format!("jre17-{}.tar.xz", get_system_arch()),
+            },
+        ))
     }
 
-    on_progress(0.15, format!("准备下载 Java {}", java_version)).await;
-    Ok((java_versions_dir, packages[0].clone()))
+    #[cfg(not(target_os = "android"))]
+    {
+        let packages = fetch_java_packages(java_version).await?;
+
+        if packages.is_empty() {
+            return Err(anyhow!(
+                "未找到 Java {} 版本，系统: {}，架构: {}",
+                java_version,
+                get_system_os()?,
+                get_system_arch()
+            ));
+        }
+
+        on_progress(0.15, format!("准备下载 Java {}", java_version)).await;
+        Ok((java_versions_dir, packages[0].clone()))
+    }
 }
 
 /// 下载并解压Java包
@@ -518,11 +546,81 @@ async fn download_and_extract_java(
     // 创建 Java 版本目录
     fs::create_dir_all(java_versions_dir).await?;
 
-    // 解压 ZIP 文件
+    // 解压 ZIP 文件（Android 为 tar.xz）
     on_progress(0.85, "正在解析压缩文件...".to_string()).await;
-    let root_dir_name = extract_zip(&file_bytes, java_versions_dir, Some(on_progress)).await?;
+    let root_dir_name = if package.name.ends_with(".tar.xz") {
+        extract_tar_xz(&file_bytes, java_versions_dir, Some(on_progress)).await?
+    } else {
+        extract_zip(&file_bytes, java_versions_dir, Some(on_progress)).await?
+    };
 
     Ok(root_dir_name)
+}
+
+/// 解压 tar.xz 文件（Android Bionic JRE17 格式）
+async fn extract_tar_xz(
+    tar_xz_data: &[u8],
+    extract_to: &Path,
+    on_progress: Option<&Arc<impl Fn(f64, String) -> DartFnFuture<()> + Send + Sync>>,
+) -> Result<String> {
+    let cursor = Cursor::new(tar_xz_data);
+    let xz_decoder = XzDecoder::new(cursor);
+    let mut archive = Archive::new(xz_decoder);
+
+    let mut root_dir_name = None;
+    let entries = archive.entries()?;
+    let total_entries = entries.count();
+
+    // 重新打开，逐条解压
+    let cursor = Cursor::new(tar_xz_data);
+    let xz_decoder = XzDecoder::new(cursor);
+    let mut archive = Archive::new(xz_decoder);
+
+    for (i, entry) in archive.entries()?.enumerate() {
+        let mut entry = entry?;
+        let path = entry.path()?;
+
+        if root_dir_name.is_none() {
+            if let Some(first) = path.iter().next() {
+                root_dir_name = Some(first.to_string_lossy().to_string());
+            }
+        }
+
+        let dest = extract_to.join(&path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        if entry.header().entry_type().is_dir() {
+            fs::create_dir_all(&dest).await?;
+        } else {
+            let mut buffer = Vec::new();
+            entry.read_to_end(&mut buffer)?;
+            fs::write(&dest, buffer).await?;
+
+            #[cfg(unix)]
+            {
+                apply_extracted_unix_mode(&dest, entry.header().mode().ok().map(|m| m as u32)).await?;
+            }
+        }
+
+        if let Some(callback) = on_progress {
+            let progress = (i + 1) as f64 / total_entries.max(1) as f64;
+            let progress_range = config::PROGRESS_EXTRACT_END - config::PROGRESS_EXTRACT_START;
+            let overall_progress = config::PROGRESS_EXTRACT_START + (progress * progress_range);
+            callback(
+                overall_progress,
+                format!("解压中... {}/{} 文件", i + 1, total_entries),
+            )
+            .await;
+        }
+
+        if (i + 1) % config::FILE_BATCH_SIZE == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    Ok(root_dir_name.unwrap_or_else(|| "unknown".to_string()))
 }
 
 /// 配置Java安装目录
@@ -534,7 +632,9 @@ async fn configure_java_installation(
 ) -> Result<String> {
     on_progress(0.96, "配置 Java 环境...".to_string()).await;
 
-    // 重命名解压后的目录为 zulu{版本号}
+    #[cfg(target_os = "android")]
+    let target_dir_name = java_version.to_string();
+    #[cfg(not(target_os = "android"))]
     let target_dir_name = format!("zulu{}", java_version);
     on_progress(0.97, "重命名 Java 目录...".to_string()).await;
 
