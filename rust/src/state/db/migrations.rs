@@ -177,6 +177,57 @@ pub(super) async fn migrate(pool: &SqlitePool) -> Result<()> {
 
     // Discover title/summary + detail-body translation caches.
     crate::state::project_i18n::migrate_tables(pool).await?;
+
+    // Auto-repair instances where game_version was corrupted by folder paths or non-ASCII names,
+    // only if loader_version unambiguously maps to a known Minecraft version.
+    if let Ok(rows) = sqlx::query("SELECT id, game_version, loader_version FROM instances")
+        .fetch_all(pool)
+        .await
+    {
+        for row in rows {
+            let id: String = row.get("id");
+            let gv: String = row.get("game_version");
+            let lv: Option<String> = row.get("loader_version");
+            // 仅对明显非法损坏的版本（空、包含路径斜杠或非 ASCII 乱码/中文目录名）进行精准修复
+            let is_corrupted = gv.trim().is_empty()
+                || gv.contains('/')
+                || gv.contains('\\')
+                || gv.chars().any(|c| c > '\u{7f}');
+
+            if is_corrupted {
+                let mut resolved = None;
+                if let Some(lver) = &lv {
+                    if lver.starts_with("47.") {
+                        resolved = Some("1.20.1");
+                    } else if lver.starts_with("14.23.5.") {
+                        resolved = Some("1.12.2");
+                    } else if lver.starts_with("36.") {
+                        resolved = Some("1.16.5");
+                    } else if lver.starts_with("40.") {
+                        resolved = Some("1.18.2");
+                    } else if lver.starts_with("43.") {
+                        resolved = Some("1.19.2");
+                    } else if lver.starts_with("48.") {
+                        resolved = Some("1.20.2");
+                    } else if lver.starts_with("49.") {
+                        resolved = Some("1.20.4");
+                    } else if lver.starts_with("50.") {
+                        resolved = Some("1.20.6");
+                    } else if lver.starts_with("51.") {
+                        resolved = Some("1.21");
+                    }
+                }
+                if let Some(real_ver) = resolved {
+                    let _ = sqlx::query("UPDATE instances SET game_version = ? WHERE id = ?")
+                        .bind(real_ver)
+                        .bind(&id)
+                        .execute(pool)
+                        .await;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

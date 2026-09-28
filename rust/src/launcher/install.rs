@@ -297,6 +297,151 @@ fn read_jar_main_class(jar: &std::path::Path) -> Result<String> {
     Err(anyhow!("Main-Class not found in {}", jar.display()))
 }
 
+pub async fn ensure_valid_game_version(
+    pool: &sqlx::SqlitePool,
+    resource: &str,
+    instance: &mut Instance,
+) -> Result<()> {
+    let re_mc = regex::Regex::new(r"\b1\.\d+(?:\.\d+)?\b").unwrap();
+    let re_snapshot_or_old = regex::Regex::new(r"^(?:[a-c]\d+\.\d+|\d{2}w\d{2}[a-z]|rd-\d+|release|snapshot)").unwrap();
+    if re_mc.is_match(&instance.game_version) || re_snapshot_or_old.is_match(&instance.game_version) {
+        return Ok(());
+    }
+
+    let mut detected_version: Option<String> = None;
+    let mut detected_loader: Option<String> = None;
+    let mut detected_loader_version: Option<String> = None;
+
+    let base_versions_dir = dirs::versions(resource);
+    let candidates = [
+        base_versions_dir.join(&instance.path).join(format!("{}.json", instance.path)),
+        base_versions_dir.join(&instance.game_version).join(format!("{}.json", instance.game_version)),
+        dirs::instance_dir(resource, &instance.path).join(format!("{}.json", instance.path)),
+    ];
+
+    for candidate in candidates {
+        if candidate.exists() {
+            if let Ok(text) = tokio::fs::read_to_string(&candidate).await {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(patches) = v.get("patches").and_then(|p| p.as_array()) {
+                        for patch in patches {
+                            let pid = patch.get("id").and_then(|s| s.as_str()).unwrap_or("");
+                            let pver = patch.get("version").and_then(|s| s.as_str()).unwrap_or("");
+                            let pinherits = patch.get("inheritsFrom").and_then(|s| s.as_str()).unwrap_or("");
+                            if (pid == "game" || pid == "minecraft") && re_mc.is_match(pver) {
+                                detected_version = re_mc.find(pver).map(|m| m.as_str().to_string());
+                            }
+                            if detected_version.is_none() && re_mc.is_match(pinherits) {
+                                detected_version = re_mc.find(pinherits).map(|m| m.as_str().to_string());
+                            }
+                            if pid == "forge" {
+                                detected_loader = Some("forge".to_string());
+                                if let Some(m) = re_mc.find(pver) {
+                                    if detected_version.is_none() {
+                                        detected_version = Some(m.as_str().to_string());
+                                    }
+                                }
+                                if let Some(caps) = regex::Regex::new(r"forge[-:]?(\d+(?:\.\d+)+)").ok().and_then(|r| r.captures(pver)) {
+                                    detected_loader_version = caps.get(1).map(|m| m.as_str().to_string());
+                                }
+                            }
+                        }
+                    }
+                    if detected_version.is_none() {
+                        if let Some(inherits) = v.get("inheritsFrom").and_then(|s| s.as_str()) {
+                            if let Some(m) = re_mc.find(inherits) {
+                                detected_version = Some(m.as_str().to_string());
+                            }
+                        }
+                    }
+                    if detected_version.is_none() {
+                        if let Some(client_ver) = v.get("clientVersion").and_then(|s| s.as_str()) {
+                            if let Some(m) = re_mc.find(client_ver) {
+                                detected_version = Some(m.as_str().to_string());
+                            }
+                        }
+                    }
+                    if detected_version.is_none() {
+                        if let Some(libs) = v.get("libraries").and_then(|l| l.as_array()) {
+                            for lib in libs {
+                                let name = lib.get("name").and_then(|s| s.as_str()).unwrap_or("");
+                                if name.contains("net.minecraftforge:forge:") || name.contains("net.minecraftforge:fmlearlydisplay:") {
+                                    if let Some(m) = re_mc.find(name) {
+                                        detected_version = Some(m.as_str().to_string());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if detected_version.is_none() {
+                        if let Some(assets) = v.get("assets").and_then(|s| s.as_str()) {
+                            if let Some(m) = re_mc.find(assets) {
+                                detected_version = Some(m.as_str().to_string());
+                            }
+                        }
+                    }
+                    if detected_version.is_none() {
+                        if let Some(args) = v.get("minecraftArguments").and_then(|s| s.as_str()) {
+                            if let Some(m) = re_mc.find(args) {
+                                detected_version = Some(m.as_str().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if detected_version.is_some() {
+            break;
+        }
+    }
+
+    if detected_version.is_none() {
+        if let Some(lv) = instance.loader_version.as_deref() {
+            if lv.starts_with("47.") {
+                detected_version = Some("1.20.1".to_string());
+            } else if lv.starts_with("14.23.5.") {
+                detected_version = Some("1.12.2".to_string());
+            } else if lv.starts_with("36.") {
+                detected_version = Some("1.16.5".to_string());
+            } else if lv.starts_with("40.") {
+                detected_version = Some("1.18.2".to_string());
+            } else if lv.starts_with("43.") {
+                detected_version = Some("1.19.2".to_string());
+            } else if lv.starts_with("48.") {
+                detected_version = Some("1.20.2".to_string());
+            } else if lv.starts_with("49.") {
+                detected_version = Some("1.20.4".to_string());
+            } else if lv.starts_with("50.") {
+                detected_version = Some("1.20.6".to_string());
+            } else if lv.starts_with("51.") {
+                detected_version = Some("1.21".to_string());
+            }
+        }
+    }
+
+    if let Some(real_ver) = detected_version {
+        let lv = detected_loader_version.or_else(|| instance.loader_version.clone());
+        let ldr = detected_loader.unwrap_or_else(|| instance.loader.clone());
+
+        let _ = sqlx::query(
+            "UPDATE instances SET game_version = ?, loader = ?, loader_version = ? WHERE id = ?"
+        )
+        .bind(&real_ver)
+        .bind(&ldr)
+        .bind(&lv)
+        .bind(&instance.id)
+        .execute(pool)
+        .await;
+
+        instance.game_version = real_ver;
+        instance.loader = ldr;
+        instance.loader_version = lv;
+    }
+
+    Ok(())
+}
+
 /// Everything resolved before the game is started. Platform launch adapters
 /// consume it: an external process on desktop, a launch manifest + in-process
 /// HotSpot VM on Android.
@@ -323,9 +468,15 @@ pub(crate) async fn prepare_launch(
 ) -> Result<PreparedLaunch> {
     let state = try_state()?;
     let resource = resource_dir().await?;
-    let instance = db::get_instance(&state.pool, instance_id).await?;
+    let mut instance = db::get_instance(&state.pool, instance_id).await?;
+    ensure_valid_game_version(&state.pool, &resource, &mut instance).await?;
     if instance.install_stage != InstallStage::Installed.as_str() {
-        anyhow::bail!("instance is not installed");
+        let root = dirs::instance_dir(&resource, &instance.path);
+        if root.exists() {
+            let _ = db::set_install_stage(&state.pool, instance_id, InstallStage::Installed).await;
+        } else {
+            anyhow::bail!("instance is not installed");
+        }
     }
 
     let account = db::get_active_account(&state.pool)
@@ -342,11 +493,26 @@ pub(crate) async fn prepare_launch(
             instance
                 .loader_version
                 .as_deref()
-                .ok_or_else(|| anyhow!("missing loader version"))?
+                .unwrap_or("unknown")
         )
     };
 
-    let info = manifest::load_cached_version_info(&resource, &version_jar_id).await?;
+    let info = match manifest::load_cached_version_info(&resource, &version_jar_id).await {
+        Ok(info) => info,
+        Err(_) => match manifest::load_cached_version_info(&resource, &instance.path).await {
+            Ok(info) => info,
+            Err(_) => {
+                let (info, _) = manifest::resolve_version_info(
+                    &resource,
+                    &instance.game_version,
+                    &loader,
+                    instance.loader_version.as_deref(),
+                )
+                .await?;
+                info
+            }
+        },
+    };
     let required_major = super::args::required_java_major(&info);
     let java_arch = std::env::consts::ARCH;
 
@@ -436,12 +602,30 @@ pub(crate) async fn prepare_launch(
         .filter(|s| !s.trim().is_empty())
         .or(defaults.extra_jvm_args.as_deref())
         .unwrap_or("");
-    let extra: Vec<String> = shell_words::split(extra_source).unwrap_or_else(|_| {
-        extra_source
-            .split_whitespace()
-            .map(str::to_string)
-            .collect()
-    });
+    let dangerous_jvm_prefixes = [
+        "-javaagent",
+        "-agentlib",
+        "-agentpath",
+        "-xrun",
+        "-xx:onerror",
+        "-xx:onoutofmemoryerror",
+        "-xx:+executesystemcommand",
+    ];
+    let extra: Vec<String> = shell_words::split(extra_source)
+        .unwrap_or_else(|_| {
+            extra_source
+                .split_whitespace()
+                .map(str::to_string)
+                .collect()
+        })
+        .into_iter()
+        .filter(|arg| {
+            let lower = arg.to_ascii_lowercase();
+            !dangerous_jvm_prefixes
+                .iter()
+                .any(|prefix| lower.starts_with(prefix))
+        })
+        .collect();
 
     let auth = super::args::LaunchAuth::from(&account);
     dirs::ensure_instance_dir(&resource, &instance.path).await?;
@@ -701,7 +885,8 @@ async fn android_default_heap_mb() -> u32 {
 pub async fn required_java_major_for_instance(instance_id: &str) -> Result<u32> {
     let state = try_state()?;
     let resource = resource_dir().await?;
-    let instance = db::get_instance(&state.pool, instance_id).await?;
+    let mut instance = db::get_instance(&state.pool, instance_id).await?;
+    ensure_valid_game_version(&state.pool, &resource, &mut instance).await?;
     let loader = ModLoader::parse(&instance.loader);
     let version_jar_id = if matches!(loader, ModLoader::Vanilla) {
         instance.game_version.clone()
@@ -714,16 +899,19 @@ pub async fn required_java_major_for_instance(instance_id: &str) -> Result<u32> 
     };
     let info = match manifest::load_cached_version_info(&resource, &version_jar_id).await {
         Ok(info) => info,
-        Err(_) => {
-            let (info, _) = manifest::resolve_version_info(
-                &resource,
-                &instance.game_version,
-                &loader,
-                instance.loader_version.as_deref(),
-            )
-            .await?;
-            info
-        }
+        Err(_) => match manifest::load_cached_version_info(&resource, &instance.path).await {
+            Ok(info) => info,
+            Err(_) => {
+                let (info, _) = manifest::resolve_version_info(
+                    &resource,
+                    &instance.game_version,
+                    &loader,
+                    instance.loader_version.as_deref(),
+                )
+                .await?;
+                info
+            }
+        },
     };
     Ok(super::args::required_java_major(&info))
 }
