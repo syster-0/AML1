@@ -32,7 +32,7 @@ fn build_java_jars() {
 
     let mut cmd = Command::new(&gradle_path);
     cmd.arg(build_dir_str)
-        .arg("build")
+        .arg("assemble")
         .arg("--no-daemon")
         .arg("--console=rich")
         .current_dir(dunce::canonicalize("java").unwrap());

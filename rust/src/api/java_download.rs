@@ -5,7 +5,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -563,44 +563,61 @@ async fn extract_tar_xz(
     extract_to: &Path,
     on_progress: Option<&Arc<impl Fn(f64, String) -> DartFnFuture<()> + Send + Sync>>,
 ) -> Result<String> {
-    let cursor = Cursor::new(tar_xz_data);
-    let xz_decoder = XzDecoder::new(cursor);
-    let mut archive = Archive::new(xz_decoder);
+    // 同步解析 tar.xz 内容，避免非 Send 的 XzDecoder 跨越 await 点
+    let (root_dir_name, items) = {
+        let cursor = Cursor::new(tar_xz_data);
+        let xz_decoder = XzDecoder::new(cursor);
+        let mut archive = Archive::new(xz_decoder);
 
-    let mut root_dir_name = None;
-    let entries = archive.entries()?;
-    let total_entries = entries.count();
+        let mut root_dir_name = None;
+        let mut items = Vec::new();
 
-    // 重新打开，逐条解压
-    let cursor = Cursor::new(tar_xz_data);
-    let xz_decoder = XzDecoder::new(cursor);
-    let mut archive = Archive::new(xz_decoder);
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.to_path_buf();
 
-    for (i, entry) in archive.entries()?.enumerate() {
-        let mut entry = entry?;
-        let path = entry.path()?;
-
-        if root_dir_name.is_none() {
-            if let Some(first) = path.iter().next() {
-                root_dir_name = Some(first.to_string_lossy().to_string());
+            if root_dir_name.is_none() {
+                if let Some(first) = path.iter().next() {
+                    root_dir_name = Some(first.to_string_lossy().to_string());
+                }
             }
+
+            let is_dir = entry.header().entry_type().is_dir();
+            let mode = entry.header().mode().ok().map(|m| m as u32);
+            let data = if !is_dir {
+                let mut buffer = Vec::new();
+                entry.read_to_end(&mut buffer)?;
+                Some(buffer)
+            } else {
+                None
+            };
+
+            items.push((path, is_dir, data, mode));
         }
 
+        (root_dir_name, items)
+    };
+
+    let total_entries = items.len();
+
+    // 异步创建文件和目录
+    for (i, (path, is_dir, data, mode)) in items.into_iter().enumerate() {
         let dest = extract_to.join(&path);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).await?;
-        }
 
-        if entry.header().entry_type().is_dir() {
+        if is_dir {
             fs::create_dir_all(&dest).await?;
         } else {
-            let mut buffer = Vec::new();
-            entry.read_to_end(&mut buffer)?;
-            fs::write(&dest, buffer).await?;
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+
+            if let Some(buffer) = data {
+                fs::write(&dest, buffer).await?;
+            }
 
             #[cfg(unix)]
             {
-                apply_extracted_unix_mode(&dest, entry.header().mode().ok().map(|m| m as u32)).await?;
+                apply_extracted_unix_mode(&dest, mode).await?;
             }
         }
 
